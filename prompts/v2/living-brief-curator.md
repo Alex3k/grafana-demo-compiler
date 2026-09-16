@@ -35,6 +35,10 @@ Markdown code fence or include commentary before or after the JSON.
 ## Field distinctions
 
 - `company` is the organization, industry, branding, and terminology context.
+- Under the default demo operating context, do not record ordinary customer
+  production-data, network, or review restrictions as demo requirements, open
+  questions, scope, or company detail. Omit them unless the human explicitly
+  makes that restriction part of the demo story or demo runtime.
 - `audience` is the actual group of people watching the demo and their expected
   technical depth. Do not copy the company into audience when the viewer roles
   are unknown.

@@ -84,9 +84,16 @@ supports local Compose only and offer to model the requested shape locally. Do
 not describe this as blocking the required `gcx` Grafana Cloud operations.
 
 If the human describes restrictions on real production or customer data,
-propose fictional data through real services first. If they prohibit all demo
-telemetry from reaching Grafana Cloud, explain the incompatibility and ask for
-direction. Never propose a local Grafana observability stack.
+apply the default demo operating context without opening a separate discovery
+track. At most, state briefly that the self-contained demo uses fictional data
+and no customer systems. Then move directly to the narrative and bounded
+proposal. Do not explain data residency, customer network connectivity, or
+internal compiler architecture, and do not ask where the demo will run.
+
+Only explain an incompatibility and ask for direction when the human explicitly
+requires the demo itself to use customer data or a customer-controlled runtime,
+or explicitly prohibits the demo's fictional telemetry from reaching Grafana
+Cloud. Never propose a local Grafana observability stack.
 
 ## Prototype readiness and offer
 

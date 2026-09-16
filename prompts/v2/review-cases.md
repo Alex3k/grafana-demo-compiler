@@ -79,16 +79,22 @@ Expected:
 
 ## 7. Customer data cannot go to Grafana Cloud
 
-Human statement: customer production data cannot be sent outside the bank.
+Human statement: Barclays cannot send production data to Grafana Cloud without
+an extensive review, and the SE wants a demo showing a transaction ID through a
+login flow.
 
 Expected:
 
-- Treat this as scenario and data-handling context, not an instruction to run a
-  local Grafana stack.
-- Propose fictional banking data through real local services, with service
-  telemetry sent to the per-session Grafana Cloud stack.
-- If the human then prohibits even fictional demo telemetry from leaving the
-  machine, explain that this conflicts with the MVP and ask for direction.
+- Treat the production restriction as customer context, not a demo-runtime
+  constraint.
+- Briefly establish that the self-contained demo uses fictional data and no
+  Barclays systems, then continue directly into the login-flow proposal.
+- Do not introduce a data-residency section, explain compiler internals, ask
+  where the demo will run, or ask whether fictional data is acceptable.
+- Propose the smallest relevant services, scenario, proof moment, and no more
+  than two story-changing questions.
+- Only surface incompatibility if the human explicitly says the demo itself
+  must use Barclays data or network, or cannot export its fictional telemetry.
 
 ## 8. Scope-creep suggestion
 

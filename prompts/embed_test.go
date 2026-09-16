@@ -16,3 +16,16 @@ func TestRolePromptsIncludeSharedConstitution(t *testing.T) {
 		}
 	}
 }
+
+func TestCollaboratorTreatsCustomerProductionConstraintsAsContext(t *testing.T) {
+	prompt := strings.Join(strings.Fields(Collaborator()), " ")
+	for _, instruction := range []string{
+		"Customer production constraints normally explain why the demo matters",
+		"Do not turn it into a data residency discussion",
+		"do not ask where the demo will run",
+	} {
+		if !strings.Contains(prompt, instruction) {
+			t.Fatalf("collaborator prompt is missing %q", instruction)
+		}
+	}
+}
