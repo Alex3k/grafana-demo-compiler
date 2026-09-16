@@ -287,6 +287,9 @@ func (s *Server) handleBlockedDeployment(ctx context.Context, w http.ResponseWri
 }
 
 func (s *Server) updateLivingBrief(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session, parentGenerationIDs ...string) {
+	defer func() {
+		_ = writeEvent(w, flusher, "turn_completed", map[string]string{"sessionId": session.ID})
+	}()
 	activity, _ := s.store.CreateMessage(ctx, domain.Message{
 		SessionID: session.ID,
 		Role:      "system",

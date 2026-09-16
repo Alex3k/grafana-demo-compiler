@@ -80,6 +80,7 @@ function App() {
   }
 
   function applyStreamEvent(streamEvent: StreamEvent) {
+    if (streamEvent.event === "turn_completed" || streamEvent.event === "error") setSending(false);
     setActive((current) => {
       if (!current) return current;
       const messages = [...(current.messages ?? [])];
@@ -137,12 +138,11 @@ function App() {
               <SessionHeader session={active} />
               <Conversation
                 messages={active.messages ?? []}
-                sending={sending}
                 containerRef={conversationRef}
                 onScrollPositionChange={(atBottom) => { stickToBottomRef.current = atBottom; }}
               />
               {error && <div className="error-banner">{error}</div>}
-              <Composer disabled={sending} onSend={(content) => void send(content)} />
+              <Composer busy={sending} onSend={(content) => void send(content)} />
             </>
           ) : (
             <EmptyState onNew={() => void newSession()} />
@@ -196,7 +196,7 @@ function SessionHeader({ session }: { session: Session }) {
   );
 }
 
-function Conversation({ messages, sending, containerRef, onScrollPositionChange }: { messages: Message[]; sending: boolean; containerRef: React.RefObject<HTMLElement | null>; onScrollPositionChange: (atBottom: boolean) => void }) {
+function Conversation({ messages, containerRef, onScrollPositionChange }: { messages: Message[]; containerRef: React.RefObject<HTMLElement | null>; onScrollPositionChange: (atBottom: boolean) => void }) {
   function trackScroll(element: HTMLElement) {
     const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
     onScrollPositionChange(distanceFromBottom < 80);
@@ -228,27 +228,26 @@ function Conversation({ messages, sending, containerRef, onScrollPositionChange 
           </div>
         </article>
       ))}
-      {sending && !messages.some((message) => message.status === "streaming") && <div className="activity"><span className="activity-pulse" />Saving your message</div>}
     </section>
   );
 }
 
-function Composer({ disabled, onSend }: { disabled: boolean; onSend: (content: string) => void }) {
+function Composer({ busy, onSend }: { busy: boolean; onSend: (content: string) => void }) {
   const [content, setContent] = useState("");
   function submit(event: FormEvent) {
     event.preventDefault();
     const value = content.trim();
-    if (!value || disabled) return;
+    if (!value || busy) return;
     setContent("");
     onSend(value);
   }
   return (
     <form className="composer" onSubmit={submit}>
-      <textarea value={content} disabled={disabled} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
+      <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
       }} placeholder="Describe the demo you want to build…" rows={2} />
-      <button type="submit" disabled={disabled || !content.trim()} aria-label="Send message">↑</button>
-      <span className="composer-help">Enter to send · Shift+Enter for a new line</span>
+      <button type="submit" disabled={busy || !content.trim()} aria-label="Send message">↑</button>
+      <span className="composer-help">{busy ? "Finishing the current turn · keep typing" : "Enter to send · Shift+Enter for a new line"}</span>
     </form>
   );
 }

@@ -55,10 +55,15 @@ export async function streamMessage(
       const eventLine = block.split("\n").find((line) => line.startsWith("event: "));
       const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
       if (!eventLine || !dataLine) continue;
+      const event = eventLine.slice(7);
       onEvent({
-        event: eventLine.slice(7),
+        event,
         data: JSON.parse(dataLine.slice(6)) as Message | Record<string, string>,
       });
+      if (event === "turn_completed" || event === "error") {
+        await reader.cancel();
+        return;
+      }
     }
     if (done) break;
   }
