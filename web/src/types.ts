@@ -17,6 +17,62 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   messages?: Message[];
+  brief?: LivingBrief;
+}
+
+export type BriefStatus = "unknown" | "proposed" | "confirmed";
+
+export interface BriefItem {
+  name: string;
+  value: string;
+  status: BriefStatus;
+}
+
+export interface NarrativeBeat {
+  stage: string;
+  detail: string;
+  minutes: number;
+}
+
+export interface LivingBrief {
+  version: number;
+  updatedAt: string;
+  content: {
+    changes: string[];
+    audience: BriefItem;
+    company: BriefItem;
+    outcome: BriefItem;
+    stakes: BriefItem;
+    scenario: BriefItem;
+    journey: BriefItem;
+    proofPoints: BriefItem[];
+    services: BriefItem[];
+    telemetry: BriefItem[];
+    grafanaResources: BriefItem[];
+    narrative: NarrativeBeat[];
+    mermaid: string;
+    openQuestions: string[];
+    decisions: Array<{ summary: string; status: BriefStatus; evidence: string }>;
+    prototypeOffer: {
+      ready: boolean;
+      summary: string;
+      services: string[];
+      scenario: string;
+      telemetry: string[];
+      grafanaResources: string[];
+      assumptions: string[];
+    };
+    acceptance: {
+      accepted: boolean;
+      evidence: string;
+      evaluation: {
+        result: "" | "meets" | "partially_meets" | "does_not_meet";
+        explanation: string;
+        missing: string[];
+        evidence: string[];
+      };
+    };
+  };
 }
 
 export interface Health {
