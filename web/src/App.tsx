@@ -14,12 +14,18 @@ const EMPTY_HEALTH: Health = {
   agentObservability: { status: "checking", detail: "Checking connection" },
 };
 
+interface QueuedMessage {
+  id: string;
+  content: string;
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [active, setActive] = useState<Session | null>(null);
   const [health, setHealth] = useState<Health>(EMPTY_HEALTH);
   const [focused, setFocused] = useState(() => localStorage.getItem("layout") === "focused");
   const [sending, setSending] = useState(false);
+  const [messageQueues, setMessageQueues] = useState<Record<string, QueuedMessage[]>>({});
   const [error, setError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
@@ -29,6 +35,7 @@ function App() {
   const [topicError, setTopicError] = useState("");
   const conversationRef = useRef<HTMLElement>(null);
   const stickToBottomRef = useRef(true);
+  const sendingRef = useRef(false);
 
   useEffect(() => {
     void Promise.all([api.sessions(), api.health()])
@@ -45,6 +52,14 @@ function App() {
     const conversation = conversationRef.current;
     conversation?.scrollTo({ top: conversation.scrollHeight, behavior: "auto" });
   }, [active?.messages]);
+
+  useEffect(() => {
+    if (!active || sendingRef.current) return;
+    const next = messageQueues[active.id]?.[0];
+    if (!next) return;
+    setMessageQueues((current) => ({ ...current, [active.id]: (current[active.id] ?? []).filter((message) => message.id !== next.id) }));
+    void sendNow(active.id, next.content);
+  }, [active?.id, messageQueues, sending]);
 
   async function refreshSessions() {
     const items = await api.sessions();
@@ -69,17 +84,33 @@ function App() {
     setSidebarOpen(false);
   }
 
-  async function send(content: string) {
-    if (!active || sending) return;
+  function send(content: string) {
+    if (!active) return;
+    if (sendingRef.current) {
+      const queued = { id: crypto.randomUUID(), content };
+      setMessageQueues((current) => ({ ...current, [active.id]: [...(current[active.id] ?? []), queued] }));
+      return;
+    }
+    void sendNow(active.id, content);
+  }
+
+  function removeQueuedMessage(sessionId: string, messageId: string) {
+    setMessageQueues((current) => ({ ...current, [sessionId]: (current[sessionId] ?? []).filter((message) => message.id !== messageId) }));
+  }
+
+  async function sendNow(sessionId: string, content: string) {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
     stickToBottomRef.current = true;
     setSending(true);
     setError("");
     try {
-      await streamMessage(active.id, content, applyStreamEvent);
+      await streamMessage(sessionId, content, (streamEvent) => applyStreamEvent(sessionId, streamEvent));
       await refreshSessions();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The message could not be sent.");
     } finally {
+      sendingRef.current = false;
       setSending(false);
       void api.health().then(setHealth).catch(() => undefined);
     }
@@ -150,10 +181,9 @@ function App() {
     });
   }
 
-  function applyStreamEvent(streamEvent: StreamEvent) {
-    if (streamEvent.event === "turn_completed" || streamEvent.event === "error") setSending(false);
+  function applyStreamEvent(sessionId: string, streamEvent: StreamEvent) {
     setActive((current) => {
-      if (!current) return current;
+      if (!current || current.id !== sessionId) return current;
       const messages = [...(current.messages ?? [])];
       if (["user_message", "activity", "message_started", "message_completed"].includes(streamEvent.event)) {
         const incoming = streamEvent.data as Message;
@@ -213,7 +243,12 @@ function App() {
                 onScrollPositionChange={(atBottom) => { stickToBottomRef.current = atBottom; }}
               />
               {error && <div className="error-banner">{error}</div>}
-              <Composer busy={sending} onSend={(content) => void send(content)} />
+              <Composer
+                busy={sending}
+                queued={messageQueues[active.id] ?? []}
+                onSend={send}
+                onRemoveQueued={(messageId) => removeQueuedMessage(active.id, messageId)}
+              />
             </>
           ) : (
             <EmptyState onNew={() => void newSession()} />
@@ -320,23 +355,37 @@ function Conversation({ messages, containerRef, onScrollPositionChange }: { mess
   );
 }
 
-function Composer({ busy, onSend }: { busy: boolean; onSend: (content: string) => void }) {
+function Composer({ busy, queued, onSend, onRemoveQueued }: { busy: boolean; queued: QueuedMessage[]; onSend: (content: string) => void; onRemoveQueued: (messageId: string) => void }) {
   const [content, setContent] = useState("");
   function submit(event: FormEvent) {
     event.preventDefault();
     const value = content.trim();
-    if (!value || busy) return;
+    if (!value) return;
     setContent("");
     onSend(value);
   }
   return (
-    <form className="composer" onSubmit={submit}>
-      <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
-        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
-      }} placeholder="Describe the demo you want to build…" rows={2} />
-      <button type="submit" disabled={busy || !content.trim()} aria-label="Send message">↑</button>
-      <span className="composer-help">{busy ? "Finishing the current turn · keep typing" : "Enter to send · Shift+Enter for a new line"}</span>
-    </form>
+    <div className="composer-area">
+      {queued.length > 0 && (
+        <section className="message-queue" aria-label="Queued messages">
+          <div className="message-queue-header"><strong>Queued</strong><span>{queued.length}</span></div>
+          {queued.map((message, index) => (
+            <div className="queued-message" key={message.id}>
+              <span className="queued-position">{index + 1}</span>
+              <p>{message.content}</p>
+              <button type="button" onClick={() => onRemoveQueued(message.id)} aria-label={`Remove queued message ${index + 1}`}>×</button>
+            </div>
+          ))}
+        </section>
+      )}
+      <form className="composer" onSubmit={submit}>
+        <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+        }} placeholder={busy ? "Add a message to the queue…" : "Describe the demo you want to build…"} rows={2} />
+        <button type="submit" disabled={!content.trim()} aria-label={busy ? "Queue message" : "Send message"}>↑</button>
+        <span className="composer-help">{busy ? "Enter to queue · Shift+Enter for a new line" : "Enter to send · Shift+Enter for a new line"}</span>
+      </form>
+    </div>
   );
 }
 

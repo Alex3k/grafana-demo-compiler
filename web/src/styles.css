@@ -90,6 +90,14 @@ button { color: inherit; }
 .activity-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--purple); box-shadow: 0 0 9px var(--purple); animation: pulse 1.6s infinite; }
 .typing::after { content: "…"; animation: fade 1s infinite; }
 .error-banner { margin: 0 max(28px, calc((100% - 760px) / 2)) 10px; border: 1px solid rgba(251, 98, 98, .35); background: rgba(96, 31, 40, .24); border-radius: 8px; padding: 9px 12px; color: #f4b7bb; font-size: 12px; }
+.message-queue { max-height: 170px; overflow-y: auto; margin: 0 max(22px, calc((100% - 780px) / 2)) 8px; border: 1px solid #34313d; border-radius: 10px; padding: 9px 10px; background: #111116; }
+.message-queue-header { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; color: #aaa6b4; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.message-queue-header span { display: grid; place-items: center; min-width: 18px; height: 18px; border-radius: 999px; background: rgba(150, 104, 255, .15); color: #c2aaff; font-size: 9px; }
+.queued-message { display: grid; grid-template-columns: 20px minmax(0, 1fr) 26px; align-items: center; gap: 8px; padding: 7px 6px; border-top: 1px solid #27262f; }
+.queued-position { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: #1d1b24; color: #9c91aa; font-size: 9px; }
+.queued-message p { min-width: 0; overflow: hidden; margin: 0; color: #d8d4dd; font-size: 11px; line-height: 1.35; white-space: nowrap; text-overflow: ellipsis; }
+.queued-message button { display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 7px; background: transparent; color: #8f8a98; cursor: pointer; font-size: 16px; }
+.queued-message button:hover { background: rgba(251, 98, 98, .12); color: #f2a3a3; }
 .composer { position: relative; margin: 0 max(22px, calc((100% - 780px) / 2)) 20px; border: 1px solid #373640; background: #15151b; border-radius: 12px; padding: 10px 51px 23px 13px; box-shadow: 0 10px 40px rgba(0, 0, 0, .28); }
 .composer:focus-within { border-color: #5b5269; box-shadow: 0 0 0 2px rgba(150, 104, 255, .09); }
 .composer textarea { width: 100%; resize: none; border: 0; outline: 0; background: transparent; color: #f1eef5; line-height: 1.4; }
@@ -234,6 +242,7 @@ button { color: inherit; }
   .session-header h1 { font-size: 17px; }
   .conversation { padding: 20px 16px; }
   .message-user { margin-left: 0; }
+  .message-queue { margin: 0 12px 8px; }
   .composer { margin: 0 12px 12px; }
   .error-banner { margin: 0 12px 8px; }
   .architecture-overlay { padding: 10px; }
