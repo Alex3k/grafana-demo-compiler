@@ -50,12 +50,14 @@ button { color: inherit; }
 .status-dot.bad { background: #fb6262; }
 .empty-copy { padding: 6px 10px; color: var(--muted); font-size: 12px; }
 
-.workspace { display: grid; min-width: 0; grid-template-rows: auto 1fr auto auto; background: rgba(9, 9, 12, .55); }
+.workspace { display: grid; min-width: 0; min-height: 0; overflow: hidden; grid-template-rows: auto minmax(0, 1fr) auto auto; background: rgba(9, 9, 12, .55); }
 .session-header { display: flex; align-items: center; justify-content: space-between; min-height: 86px; padding: 14px 28px; border-bottom: 1px solid var(--border); }
 .session-header .eyebrow { margin: 0 0 5px; }
 .session-header h1 { margin: 0; max-width: 700px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; font-weight: 700; }
 .state-pill { border: 1px solid #3c3946; background: #191820; border-radius: 999px; padding: 5px 10px; color: #bbb7c7; font-size: 11px; }
-.conversation { overflow-y: auto; padding: 26px max(28px, calc((100% - 760px) / 2)); }
+.conversation { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: #45414e transparent; scrollbar-width: thin; padding: 26px max(28px, calc((100% - 760px) / 2)); }
+.conversation::-webkit-scrollbar { width: 9px; }
+.conversation::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #45414e; background-clip: padding-box; }
 .conversation.welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .welcome h2 { margin: 16px 0 8px; font-size: 24px; font-weight: 700; }
 .welcome p { max-width: 540px; color: var(--muted); line-height: 1.6; }

@@ -23,7 +23,8 @@ function App() {
   const [error, setError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
+  const stickToBottomRef = useRef(true);
 
   useEffect(() => {
     void Promise.all([api.sessions(), api.health()])
@@ -36,7 +37,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!stickToBottomRef.current) return;
+    const conversation = conversationRef.current;
+    conversation?.scrollTo({ top: conversation.scrollHeight, behavior: "auto" });
   }, [active?.messages]);
 
   async function refreshSessions() {
@@ -46,12 +49,14 @@ function App() {
 
   async function selectSession(session: Session) {
     setError("");
+    stickToBottomRef.current = true;
     setActive(await api.session(session.id));
     setSidebarOpen(false);
   }
 
   async function newSession() {
     setError("");
+    stickToBottomRef.current = true;
     const session = await api.createSession();
     setActive({ ...session, messages: [] });
     await refreshSessions();
@@ -60,6 +65,7 @@ function App() {
 
   async function send(content: string) {
     if (!active || sending) return;
+    stickToBottomRef.current = true;
     setSending(true);
     setError("");
     try {
@@ -129,7 +135,12 @@ function App() {
           {active ? (
             <>
               <SessionHeader session={active} />
-              <Conversation messages={active.messages ?? []} sending={sending} endRef={endRef} />
+              <Conversation
+                messages={active.messages ?? []}
+                sending={sending}
+                containerRef={conversationRef}
+                onScrollPositionChange={(atBottom) => { stickToBottomRef.current = atBottom; }}
+              />
               {error && <div className="error-banner">{error}</div>}
               <Composer disabled={sending} onSend={(content) => void send(content)} />
             </>
@@ -185,19 +196,22 @@ function SessionHeader({ session }: { session: Session }) {
   );
 }
 
-function Conversation({ messages, sending, endRef }: { messages: Message[]; sending: boolean; endRef: React.RefObject<HTMLDivElement | null> }) {
+function Conversation({ messages, sending, containerRef, onScrollPositionChange }: { messages: Message[]; sending: boolean; containerRef: React.RefObject<HTMLElement | null>; onScrollPositionChange: (atBottom: boolean) => void }) {
+  function trackScroll(element: HTMLElement) {
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+    onScrollPositionChange(distanceFromBottom < 80);
+  }
   if (!messages.length) {
     return (
-      <section className="conversation welcome">
+      <section className="conversation welcome" ref={containerRef} onScroll={(event) => trackScroll(event.currentTarget)}>
         <div className="assistant-avatar">G</div>
         <h2>What demo should we build?</h2>
         <p>Tell me who the audience is, what you want them to understand, and any scenario already in mind. We’ll shape it together.</p>
-        <div ref={endRef} />
       </section>
     );
   }
   return (
-    <section className="conversation">
+    <section className="conversation" ref={containerRef} onScroll={(event) => trackScroll(event.currentTarget)}>
       {messages.map((message) => message.kind === "activity" ? (
         <div className="activity" key={message.id}><span className="activity-pulse" />{message.content}</div>
       ) : (
@@ -215,7 +229,6 @@ function Conversation({ messages, sending, endRef }: { messages: Message[]; send
         </article>
       ))}
       {sending && !messages.some((message) => message.status === "streaming") && <div className="activity"><span className="activity-pulse" />Saving your message</div>}
-      <div ref={endRef} />
     </section>
   );
 }
