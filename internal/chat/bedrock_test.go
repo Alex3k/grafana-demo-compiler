@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
@@ -44,5 +45,14 @@ func TestSanitizeAssistantTextRemovesInternalCompletionMarker(t *testing.T) {
 	got := sanitizeAssistantText("Ready for generation.\n\n<turn_complete>")
 	if got != "Ready for generation." {
 		t.Fatalf("sanitized text = %q", got)
+	}
+}
+
+func TestFocusContextKeepsTopicInsideMainSession(t *testing.T) {
+	got := focusContext(&domain.BriefFocus{Label: "Scenario", Value: "A camera fleet loses connectivity", Status: "proposed"})
+	for _, expected := range []string{"<focused_brief_topic>", `"label":"Scenario"`, `"status":"proposed"`, "same demo session"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("focus context missing %q: %s", expected, got)
+		}
 	}
 }

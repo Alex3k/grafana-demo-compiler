@@ -1,4 +1,4 @@
-import type { Health, Message, Session, StreamEvent } from "./types";
+import type { BriefFocus, Health, Message, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -29,12 +29,13 @@ export const api = {
 export async function streamMessage(
   sessionId: string,
   content: string,
+  focus: BriefFocus | undefined,
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
   const response = await fetch(`/api/sessions/${sessionId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, focus }),
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };

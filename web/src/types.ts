@@ -28,6 +28,12 @@ export interface BriefItem {
   status: BriefStatus;
 }
 
+export interface BriefFocus {
+  label: string;
+  value: string;
+  status: BriefStatus;
+}
+
 export interface NarrativeBeat {
   stage: string;
   detail: string;

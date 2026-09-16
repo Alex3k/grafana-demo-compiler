@@ -102,7 +102,7 @@ func (s *Service) ModelID() string {
 	return s.modelID
 }
 
-func (s *Service) Stream(ctx context.Context, session domain.Session, messages []domain.Message, onDelta func(string) error) (Result, error) {
+func (s *Service) Stream(ctx context.Context, session domain.Session, messages []domain.Message, focus *domain.BriefFocus, onDelta func(string) error) (Result, error) {
 	if !s.Configured() {
 		return Result{}, ErrNotConfigured
 	}
@@ -110,7 +110,7 @@ func (s *Service) Stream(ctx context.Context, session domain.Session, messages [
 	ctx, generationID := roleContext(ctx, session, roleCollaborator)
 
 	stream := aisdk.StreamText(ctx, s.model,
-		aisdk.WithSystem(appPrompts.Collaborator()+briefContext(session)),
+		aisdk.WithSystem(appPrompts.Collaborator()+briefContext(session)+focusContext(focus)),
 		aisdk.WithModelMessages(modelMessages(messages)...),
 		aisdk.WithMaxOutputTokens(1200),
 		aisdk.WithMaxRetries(1),
@@ -136,6 +136,17 @@ func (s *Service) Stream(ctx context.Context, session domain.Session, messages [
 		return Result{}, fmt.Errorf("stream Bedrock response: %w", err)
 	}
 	return Result{Text: sanitizeAssistantText(text.String()), GenerationID: generationID}, nil
+}
+
+func focusContext(focus *domain.BriefFocus) string {
+	if focus == nil {
+		return ""
+	}
+	payload, err := json.Marshal(focus)
+	if err != nil {
+		return ""
+	}
+	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe human opened a focused side conversation to iterate this living brief topic. Address their message in relation to this topic, preserve the wider demo context, and avoid broadening the discussion unless a dependency must be surfaced. This is part of the same demo session, not a separate thread.\n</focused_brief_topic>"
 }
 
 func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message, parentGenerationIDs ...string) (BriefResult, error) {

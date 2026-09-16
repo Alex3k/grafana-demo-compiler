@@ -39,6 +39,12 @@ type BriefItem struct {
 	Status string `json:"status"`
 }
 
+type BriefFocus struct {
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+	Status string `json:"status"`
+}
+
 type NarrativeBeat struct {
 	Stage   string `json:"stage"`
 	Detail  string `json:"detail"`

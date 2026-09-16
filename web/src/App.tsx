@@ -3,7 +3,7 @@ import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, streamMessage } from "./api";
-import type { BriefItem, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefItem, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
@@ -23,6 +23,7 @@ function App() {
   const [error, setError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
+  const [briefFocus, setBriefFocus] = useState<(BriefFocus & { startIndex: number }) | null>(null);
   const conversationRef = useRef<HTMLElement>(null);
   const stickToBottomRef = useRef(true);
 
@@ -51,6 +52,7 @@ function App() {
     setError("");
     stickToBottomRef.current = true;
     setActive(await api.session(session.id));
+    setBriefFocus(null);
     setSidebarOpen(false);
   }
 
@@ -59,17 +61,18 @@ function App() {
     stickToBottomRef.current = true;
     const session = await api.createSession();
     setActive({ ...session, messages: [] });
+    setBriefFocus(null);
     await refreshSessions();
     setSidebarOpen(false);
   }
 
-  async function send(content: string) {
+  async function send(content: string, focus?: BriefFocus) {
     if (!active || sending) return;
     stickToBottomRef.current = true;
     setSending(true);
     setError("");
     try {
-      await streamMessage(active.id, content, applyStreamEvent);
+      await streamMessage(active.id, content, focus, applyStreamEvent);
       await refreshSessions();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The message could not be sent.");
@@ -148,7 +151,22 @@ function App() {
             <EmptyState onNew={() => void newSession()} />
           )}
         </main>
-        <ContextRail open={railOpen} session={active} health={health} onClose={() => setRailOpen(false)} />
+        <ContextRail
+          open={railOpen}
+          session={active}
+          health={health}
+          onClose={() => setRailOpen(false)}
+          onFocusTopic={(focus) => setBriefFocus({ ...focus, startIndex: active?.messages?.length ?? 0 })}
+        />
+        {briefFocus && active && (
+          <TopicChat
+            focus={briefFocus}
+            messages={(active.messages ?? []).slice(briefFocus.startIndex)}
+            busy={sending}
+            onSend={(content) => void send(content, briefFocus)}
+            onClose={() => setBriefFocus(null)}
+          />
+        )}
       </div>
     </div>
   );
@@ -252,14 +270,60 @@ function Composer({ busy, onSend }: { busy: boolean; onSend: (content: string) =
   );
 }
 
-function ContextRail({ open, session, health, onClose }: { open: boolean; session: Session | null; health: Health; onClose: () => void }) {
+function TopicChat({ focus, messages, busy, onSend, onClose }: { focus: BriefFocus; messages: Message[]; busy: boolean; onSend: (content: string) => void; onClose: () => void }) {
+  const [content, setContent] = useState("");
+  const threadRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "auto" });
+  }, [messages]);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    const value = content.trim();
+    if (!value || busy) return;
+    setContent("");
+    onSend(value);
+  }
+  return (
+    <aside className="topic-chat" aria-label={`Discuss ${focus.label}`}>
+      <header>
+        <div><span>FOCUSED BRIEF CHAT</span><strong>{focus.label}</strong></div>
+        <button type="button" onClick={onClose} aria-label="Close focused chat">×</button>
+      </header>
+      <div className="topic-context">
+        <StatusPill status={focus.status} />
+        <p>{focus.value}</p>
+        <small>This conversation updates the same demo session and living brief.</small>
+      </div>
+      <div className="topic-thread" ref={threadRef}>
+        {!messages.length && <div className="topic-empty"><strong>What would you like to change?</strong><p>Respond to this topic, challenge the proposal, or add missing context.</p></div>}
+        {messages.map((message) => message.kind === "activity" ? (
+          <div className="topic-activity" key={message.id}><span className="activity-pulse" />{message.content}</div>
+        ) : (
+          <article className={`topic-message topic-message-${message.role}`} key={message.id}>
+            <span>{message.role === "user" ? "You" : "Demo Compiler"}</span>
+            <div>{message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]} skipHtml>{message.content}</Markdown> : message.content}</div>
+          </article>
+        ))}
+      </div>
+      <form className="topic-composer" onSubmit={submit}>
+        <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
+        }} placeholder={`Discuss ${focus.label.toLowerCase()}…`} rows={3} autoFocus />
+        <button type="submit" disabled={busy || !content.trim()} aria-label="Send focused message">↑</button>
+        <small>{busy ? "Updating this topic · keep typing" : "Enter to send · part of the main session"}</small>
+      </form>
+    </aside>
+  );
+}
+
+function ContextRail({ open, session, health, onClose, onFocusTopic }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
       <p className="eyebrow rail-section">LIVING BRIEF</p>
-      {session?.brief ? <BriefPanel brief={session.brief} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
+      {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
       <Connection name="SQLite" status={health.sqlite.status} detail="Persistent session store" />
       <Connection name="Amazon Bedrock" status={health.bedrock.status} detail={health.bedrock.modelId || "Model not configured"} />
@@ -273,7 +337,7 @@ function Connection({ name, status, detail }: { name: string; status: string; de
   return <div className="connection"><span className={`status-dot ${healthy ? "good" : status === "error" ? "bad" : "warn"}`} /><div><strong>{name}</strong><small>{detail}</small></div></div>;
 }
 
-function BriefPanel({ brief }: { brief: LivingBrief }) {
+function BriefPanel({ brief, onFocusTopic }: { brief: LivingBrief; onFocusTopic: (focus: BriefFocus) => void }) {
   const content = brief.content;
   const coreItems: Array<[string, BriefItem]> = [
     ["Audience", content.audience],
@@ -287,14 +351,14 @@ function BriefPanel({ brief }: { brief: LivingBrief }) {
     <div className="brief-panel">
       <div className="brief-version"><span>Version {brief.version}</span><span>{relativeTime(brief.updatedAt)}</span></div>
       {!!content.changes.length && <BriefSection title="Changed this turn"><ul>{content.changes.map((change) => <li key={change}>{change}</li>)}</ul></BriefSection>}
-      <div className="brief-core">{coreItems.map(([label, item]) => <BriefItemView key={label} label={label} item={item} />)}</div>
-      <BriefItems title="Proof points" items={content.proofPoints} />
-      <BriefItems title="Included scope" items={content.scope?.included} />
-      <BriefItems title="Deliberately excluded" items={content.scope?.excluded} />
-      {content.scope?.simulationBoundary?.value && <BriefItemView label="Simulation boundary" item={content.scope.simulationBoundary} />}
-      <BriefItems title="Services" items={content.services} />
-      <BriefItems title="Telemetry" items={content.telemetry} />
-      <BriefItems title="Grafana resources" items={content.grafanaResources} />
+      <div className="brief-core">{coreItems.map(([label, item]) => <BriefItemView key={label} label={label} item={item} onFocusTopic={onFocusTopic} />)}</div>
+      <BriefItems title="Proof points" items={content.proofPoints} onFocusTopic={onFocusTopic} />
+      <BriefItems title="Included scope" items={content.scope?.included} onFocusTopic={onFocusTopic} />
+      <BriefItems title="Deliberately excluded" items={content.scope?.excluded} onFocusTopic={onFocusTopic} />
+      {content.scope?.simulationBoundary?.value && <BriefItemView label="Simulation boundary" item={content.scope.simulationBoundary} onFocusTopic={onFocusTopic} />}
+      <BriefItems title="Services" items={content.services} onFocusTopic={onFocusTopic} />
+      <BriefItems title="Telemetry" items={content.telemetry} onFocusTopic={onFocusTopic} />
+      <BriefItems title="Grafana resources" items={content.grafanaResources} onFocusTopic={onFocusTopic} />
       {!!content.narrative.length && <BriefSection title={`Narrative · ${content.narrative.reduce((total, beat) => total + beat.minutes, 0)} min`}><ol className="narrative-list">{content.narrative.map((beat) => <li key={`${beat.stage}-${beat.detail}`}><strong>{beat.stage}</strong><span>{beat.detail}</span><small>{beat.minutes}m</small></li>)}</ol></BriefSection>}
       <ArchitectureSection source={content.mermaid} />
       {!!content.openQuestions.length && <BriefSection title={`Open questions · ${content.openQuestions.length}`} open><ul className="question-list">{content.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></BriefSection>}
@@ -305,14 +369,18 @@ function BriefPanel({ brief }: { brief: LivingBrief }) {
   );
 }
 
-function BriefItemView({ label, item }: { label: string; item: BriefItem }) {
-  return <div className="brief-item"><div><span>{label}</span><StatusPill status={item.status} /></div><p>{item.value || "Not understood yet"}</p></div>;
+function BriefItemView({ label, item, onFocusTopic }: { label: string; item: BriefItem; onFocusTopic: (focus: BriefFocus) => void }) {
+  const focusable = item.status === "proposed" || item.status === "confirmed";
+  return <button type="button" className={`brief-item ${focusable ? "is-focusable" : ""}`} disabled={!focusable} onClick={() => focusable && onFocusTopic({ label, value: item.value, status: item.status })}><div><span>{label}</span><StatusPill status={item.status} /></div><p>{item.value || "Not understood yet"}</p>{focusable && <small>Discuss this topic →</small>}</button>;
 }
 
-function BriefItems({ title, items }: { title: string; items?: BriefItem[] | null }) {
+function BriefItems({ title, items, onFocusTopic }: { title: string; items?: BriefItem[] | null; onFocusTopic: (focus: BriefFocus) => void }) {
   const visibleItems = items ?? [];
   if (!visibleItems.length) return null;
-  return <BriefSection title={`${title} · ${visibleItems.length}`}><ul className="brief-item-list">{visibleItems.map((item) => <li key={`${item.name}-${item.value}`}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span></li>)}</ul></BriefSection>;
+  return <BriefSection title={`${title} · ${visibleItems.length}`}><ul className="brief-item-list">{visibleItems.map((item) => {
+    const focusable = item.status === "proposed" || item.status === "confirmed";
+    return <li key={`${item.name}-${item.value}`}><button type="button" disabled={!focusable} onClick={() => focusable && onFocusTopic({ label: `${title}: ${item.name}`, value: item.value, status: item.status })}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span>{focusable && <small>Discuss →</small>}</button></li>;
+  })}</ul></BriefSection>;
 }
 
 function BriefSection({ title, open = false, children }: { title: string; open?: boolean; children: React.ReactNode }) {

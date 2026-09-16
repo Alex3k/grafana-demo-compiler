@@ -131,7 +131,8 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Content string `json:"content"`
+		Content string             `json:"content"`
+		Focus   *domain.BriefFocus `json:"focus"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid message request", err)
@@ -145,6 +146,18 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 	if utf8.RuneCountInString(input.Content) > 32_000 {
 		s.writeError(w, http.StatusRequestEntityTooLarge, "Message exceeds 32,000 characters", nil)
 		return
+	}
+	if input.Focus != nil {
+		input.Focus.Label = strings.TrimSpace(input.Focus.Label)
+		input.Focus.Value = strings.TrimSpace(input.Focus.Value)
+		if input.Focus.Label == "" || utf8.RuneCountInString(input.Focus.Label) > 120 || utf8.RuneCountInString(input.Focus.Value) > 8_000 {
+			s.writeError(w, http.StatusBadRequest, "Invalid brief topic context", nil)
+			return
+		}
+		if input.Focus.Status != "proposed" && input.Focus.Status != "confirmed" {
+			s.writeError(w, http.StatusBadRequest, "Brief topic must be proposed or confirmed", nil)
+			return
+		}
 	}
 
 	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
@@ -221,7 +234,7 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var response strings.Builder
-	result, err := s.chat.Stream(r.Context(), session, messages, func(delta string) error {
+	result, err := s.chat.Stream(r.Context(), session, messages, input.Focus, func(delta string) error {
 		response.WriteString(delta)
 		if err := s.store.UpdateMessage(r.Context(), assistantMessage.ID, response.String(), "streaming"); err != nil {
 			return err
