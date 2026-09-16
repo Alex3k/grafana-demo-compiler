@@ -23,6 +23,7 @@ const (
 	roleCollaborator = "demo-collaborator"
 	roleCurator      = "living-brief-curator"
 	roleEvaluator    = "requirement-evaluator"
+	briefUpdateTool  = "propose_brief_update"
 )
 
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
@@ -46,6 +47,66 @@ type BriefResult struct {
 type EvaluationResult struct {
 	Evaluation   domain.AlignmentEvaluation
 	GenerationID string
+}
+
+type briefUpdateReceipt struct {
+	Status      string `json:"status"`
+	ChangeCount int    `json:"changeCount"`
+}
+
+// briefUpdateProposal mirrors the curator-owned brief contract. The persisted
+// PlanAcceptance also contains an evaluator result, but the curator must not
+// produce that field.
+type briefUpdateProposal struct {
+	Changes          []string               `json:"changes"`
+	Audience         domain.BriefItem       `json:"audience"`
+	Company          domain.BriefItem       `json:"company"`
+	Outcome          domain.BriefItem       `json:"outcome"`
+	Stakes           domain.BriefItem       `json:"stakes"`
+	Scenario         domain.BriefItem       `json:"scenario"`
+	Journey          domain.BriefItem       `json:"journey"`
+	ProofPoints      []domain.BriefItem     `json:"proofPoints"`
+	Scope            domain.BriefScope      `json:"scope"`
+	Services         []domain.BriefItem     `json:"services"`
+	Telemetry        []domain.BriefItem     `json:"telemetry"`
+	GrafanaResources []domain.BriefItem     `json:"grafanaResources"`
+	Narrative        []domain.NarrativeBeat `json:"narrative"`
+	Mermaid          string                 `json:"mermaid"`
+	OpenQuestions    []string               `json:"openQuestions"`
+	Decisions        []domain.BriefDecision `json:"decisions"`
+	PrototypeOffer   domain.PrototypeOffer  `json:"prototypeOffer"`
+	Acceptance       briefAcceptance        `json:"acceptance"`
+}
+
+type briefAcceptance struct {
+	Accepted bool   `json:"accepted"`
+	Evidence string `json:"evidence"`
+}
+
+func (proposal briefUpdateProposal) content() domain.BriefContent {
+	return domain.BriefContent{
+		Changes:          proposal.Changes,
+		Audience:         proposal.Audience,
+		Company:          proposal.Company,
+		Outcome:          proposal.Outcome,
+		Stakes:           proposal.Stakes,
+		Scenario:         proposal.Scenario,
+		Journey:          proposal.Journey,
+		ProofPoints:      proposal.ProofPoints,
+		Scope:            proposal.Scope,
+		Services:         proposal.Services,
+		Telemetry:        proposal.Telemetry,
+		GrafanaResources: proposal.GrafanaResources,
+		Narrative:        proposal.Narrative,
+		Mermaid:          proposal.Mermaid,
+		OpenQuestions:    proposal.OpenQuestions,
+		Decisions:        proposal.Decisions,
+		PrototypeOffer:   proposal.PrototypeOffer,
+		Acceptance: domain.PlanAcceptance{
+			Accepted: proposal.Acceptance.Accepted,
+			Evidence: proposal.Acceptance.Evidence,
+		},
+	}
 }
 
 func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
@@ -170,10 +231,31 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, fmt.Errorf("encode living brief context: %w", err)
 	}
 
+	var candidate *domain.BriefContent
+	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[briefUpdateProposal, briefUpdateReceipt]{
+		Name:        briefUpdateTool,
+		Title:       "Propose living brief update",
+		Description: "Submit the complete proposed living brief. This records a draft only; it cannot confirm human decisions or overwrite locked confirmed topics.",
+		Execute: func(_ context.Context, proposal briefUpdateProposal, _ aisdk.ToolExecutionOptions) (briefUpdateReceipt, error) {
+			content := normalizeBrief(proposal.content())
+			if session.Brief != nil {
+				content = preserveConfirmedBrief(session.Brief.Content, content)
+			}
+			candidate = &content
+			return briefUpdateReceipt{Status: "draft_received", ChangeCount: len(content.Changes)}, nil
+		},
+	})
+	if err != nil {
+		return BriefResult{}, fmt.Errorf("create living brief tool: %w", err)
+	}
+
 	ctx, generationID := roleContext(ctx, session, roleCurator, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Curator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithTools(aisdk.ToolSet{briefUpdateTool: tool}),
+		aisdk.WithToolChoice(provider.ToolChoice{Type: provider.ToolChoiceTool, ToolName: briefUpdateTool}),
+		aisdk.WithStopWhen(aisdk.StepCountIs(1)),
 		aisdk.WithMaxOutputTokens(6000),
 		aisdk.WithMaxRetries(1),
 	)
@@ -185,15 +267,10 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 	if err := stream.Err(); err != nil {
 		return BriefResult{}, fmt.Errorf("generate living brief: %w", err)
 	}
-	var brief domain.BriefContent
-	if err := json.Unmarshal([]byte(stripJSONFence(stream.Text())), &brief); err != nil {
-		return BriefResult{}, fmt.Errorf("decode living brief: %w", err)
+	if candidate == nil {
+		return BriefResult{}, fmt.Errorf("generate living brief: model did not call %s", briefUpdateTool)
 	}
-	content := normalizeBrief(brief)
-	if session.Brief != nil {
-		content = preserveConfirmedBrief(session.Brief.Content, content)
-	}
-	return BriefResult{Content: content, GenerationID: generationID}, nil
+	return BriefResult{Content: *candidate, GenerationID: generationID}, nil
 }
 
 func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brief domain.BriefContent, messages []domain.Message, parentGenerationIDs ...string) (EvaluationResult, error) {
@@ -310,11 +387,15 @@ func confirmedBriefFacts(brief *domain.LivingBrief) string {
 
 func roleContext(ctx context.Context, session domain.Session, role string, parentGenerationIDs ...string) (context.Context, string) {
 	generationID := agentobservability.NewGenerationID()
-	ctx = agento11y.WithConversationID(ctx, session.ID)
-	ctx = agento11y.WithConversationTitle(ctx, session.Title)
+	visibility := "internal"
+	if role == roleCollaborator {
+		ctx = agento11y.WithConversationID(ctx, session.ID)
+		ctx = agento11y.WithConversationTitle(ctx, session.Title)
+		visibility = "user"
+	}
 	ctx = agento11y.WithAgentName(ctx, observability.AgentName+"/"+role)
 	ctx = agento11y.WithAgentVersion(ctx, observability.AgentVersion)
-	ctx = agento11y.WithTags(ctx, map[string]string{"agent.role": role, "prompt.version": appPrompts.Version})
+	ctx = agento11y.WithTags(ctx, map[string]string{"agent.role": role, "generation.visibility": visibility, "prompt.version": appPrompts.Version})
 	ctx = agentobservability.WithGenerationID(ctx, generationID)
 	ctx = agentobservability.WithParentGenerationIDs(ctx, parentGenerationIDs...)
 	return ctx, generationID
