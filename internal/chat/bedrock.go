@@ -189,7 +189,11 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 	if err := json.Unmarshal([]byte(stripJSONFence(stream.Text())), &brief); err != nil {
 		return BriefResult{}, fmt.Errorf("decode living brief: %w", err)
 	}
-	return BriefResult{Content: normalizeBrief(brief), GenerationID: generationID}, nil
+	content := normalizeBrief(brief)
+	if session.Brief != nil {
+		content = preserveConfirmedBrief(session.Brief.Content, content)
+	}
+	return BriefResult{Content: content, GenerationID: generationID}, nil
 }
 
 func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brief domain.BriefContent, messages []domain.Message, parentGenerationIDs ...string) (EvaluationResult, error) {
@@ -250,7 +254,58 @@ func briefContext(session domain.Session) string {
 	if err != nil {
 		return ""
 	}
-	return "\n\n<session_context>\n" + string(payload) + "\n</session_context>"
+	context := "\n\n<session_context>\n" + string(payload) + "\n</session_context>"
+	if facts := confirmedBriefFacts(session.Brief); facts != "" {
+		context += "\n\n<confirmed_brief_facts>\nThese are the current locked facts. They supersede older conversation messages that proposed alternatives or called them unresolved. Use them as stated and do not reopen them.\n" + facts + "\n</confirmed_brief_facts>"
+	}
+	return context
+}
+
+func confirmedBriefFacts(brief *domain.LivingBrief) string {
+	if brief == nil {
+		return ""
+	}
+	type fact struct {
+		Section string `json:"section"`
+		Name    string `json:"name"`
+		Value   string `json:"value"`
+	}
+	facts := make([]fact, 0)
+	add := func(section string, item domain.BriefItem) {
+		if item.Status == "confirmed" {
+			facts = append(facts, fact{Section: section, Name: item.Name, Value: item.Value})
+		}
+	}
+	add("Audience", brief.Content.Audience)
+	add("Company", brief.Content.Company)
+	add("Outcome", brief.Content.Outcome)
+	add("Stakes", brief.Content.Stakes)
+	add("Scenario", brief.Content.Scenario)
+	add("Journey", brief.Content.Journey)
+	add("Simulation boundary", brief.Content.Scope.SimulationBoundary)
+	for _, group := range []struct {
+		section string
+		items   []domain.BriefItem
+	}{
+		{section: "Proof points", items: brief.Content.ProofPoints},
+		{section: "Included scope", items: brief.Content.Scope.Included},
+		{section: "Excluded scope", items: brief.Content.Scope.Excluded},
+		{section: "Services", items: brief.Content.Services},
+		{section: "Telemetry", items: brief.Content.Telemetry},
+		{section: "Grafana resources", items: brief.Content.GrafanaResources},
+	} {
+		for _, item := range group.items {
+			add(group.section, item)
+		}
+	}
+	if len(facts) == 0 {
+		return ""
+	}
+	payload, err := json.Marshal(facts)
+	if err != nil {
+		return ""
+	}
+	return string(payload)
 }
 
 func roleContext(ctx context.Context, session domain.Session, role string, parentGenerationIDs ...string) (context.Context, string) {
@@ -306,6 +361,54 @@ func normalizeBrief(brief domain.BriefContent) domain.BriefContent {
 		brief.Acceptance.Evaluation = domain.AlignmentEvaluation{}
 	}
 	return brief
+}
+
+// preserveConfirmedBrief prevents main-chat curation from changing decisions
+// that the human locked through a focused brief thread. Focused threads apply
+// their confirmed value directly and do not use BuildBrief.
+func preserveConfirmedBrief(current, candidate domain.BriefContent) domain.BriefContent {
+	candidate.Audience = preserveConfirmedItem(current.Audience, candidate.Audience)
+	candidate.Company = preserveConfirmedItem(current.Company, candidate.Company)
+	candidate.Outcome = preserveConfirmedItem(current.Outcome, candidate.Outcome)
+	candidate.Stakes = preserveConfirmedItem(current.Stakes, candidate.Stakes)
+	candidate.Scenario = preserveConfirmedItem(current.Scenario, candidate.Scenario)
+	candidate.Journey = preserveConfirmedItem(current.Journey, candidate.Journey)
+	candidate.Scope.SimulationBoundary = preserveConfirmedItem(current.Scope.SimulationBoundary, candidate.Scope.SimulationBoundary)
+	candidate.ProofPoints = preserveConfirmedItems(current.ProofPoints, candidate.ProofPoints)
+	candidate.Scope.Included = preserveConfirmedItems(current.Scope.Included, candidate.Scope.Included)
+	candidate.Scope.Excluded = preserveConfirmedItems(current.Scope.Excluded, candidate.Scope.Excluded)
+	candidate.Services = preserveConfirmedItems(current.Services, candidate.Services)
+	candidate.Telemetry = preserveConfirmedItems(current.Telemetry, candidate.Telemetry)
+	candidate.GrafanaResources = preserveConfirmedItems(current.GrafanaResources, candidate.GrafanaResources)
+	return candidate
+}
+
+func preserveConfirmedItem(current, candidate domain.BriefItem) domain.BriefItem {
+	if current.Status == "confirmed" {
+		return current
+	}
+	return candidate
+}
+
+func preserveConfirmedItems(current, candidate []domain.BriefItem) []domain.BriefItem {
+	result := append([]domain.BriefItem(nil), candidate...)
+	for _, locked := range current {
+		if locked.Status != "confirmed" {
+			continue
+		}
+		found := false
+		for index := range result {
+			if strings.EqualFold(strings.TrimSpace(locked.Name), strings.TrimSpace(result[index].Name)) {
+				result[index] = locked
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, locked)
+		}
+	}
+	return result
 }
 
 func normalizeEvaluation(evaluation domain.AlignmentEvaluation) domain.AlignmentEvaluation {

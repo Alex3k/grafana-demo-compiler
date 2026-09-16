@@ -22,7 +22,12 @@ Markdown code fence or include commentary before or after the JSON.
   selects, requests, or accepts it.
 - Use unknown when material information is absent.
 - Silence is never approval.
-- Preserve confirmed decisions unless the human explicitly corrects them.
+- Main-chat curation never changes a confirmed topic. Preserve every confirmed
+  item from `currentBrief` with exactly the same name, value, and status even if
+  the main conversation asks for a replacement. Confirmed replacements are
+  applied by the focused side-chat flow outside this curator.
+- A request for an example, explanation, or change must not downgrade a
+  confirmed topic or add an open question that re-presents its alternatives.
 - A latest explicit correction supersedes older evidence. Record the correction
   as a decision without erasing history from earlier brief versions.
 - If conflicting human statements do not have a clear latest correction, keep

@@ -56,3 +56,47 @@ func TestFocusContextKeepsTopicInsideMainSession(t *testing.T) {
 		}
 	}
 }
+
+func TestPreserveConfirmedBriefPreventsMainChatDowngrade(t *testing.T) {
+	current := domain.BriefContent{
+		Telemetry: []domain.BriefItem{{Name: "Logs", Value: "Structured logfmt events", Status: "confirmed"}},
+	}
+	candidate := domain.BriefContent{
+		Telemetry: []domain.BriefItem{{Name: "Logs", Value: "JSON events", Status: "proposed"}},
+	}
+
+	got := preserveConfirmedBrief(current, candidate)
+	if len(got.Telemetry) != 1 || got.Telemetry[0] != current.Telemetry[0] {
+		t.Fatalf("telemetry = %#v, want locked value %#v", got.Telemetry, current.Telemetry[0])
+	}
+}
+
+func TestPreserveConfirmedBriefRestoresOmittedTopic(t *testing.T) {
+	current := domain.BriefContent{
+		GrafanaResources: []domain.BriefItem{{Name: "Fleet overview", Value: "Device health dashboard", Status: "confirmed"}},
+	}
+
+	got := preserveConfirmedBrief(current, domain.BriefContent{})
+	if len(got.GrafanaResources) != 1 || got.GrafanaResources[0] != current.GrafanaResources[0] {
+		t.Fatalf("resources = %#v, want locked topic restored", got.GrafanaResources)
+	}
+}
+
+func TestBriefContextHighlightsConfirmedFactsAfterFullBrief(t *testing.T) {
+	session := domain.Session{
+		State: "Draft",
+		Brief: &domain.LivingBrief{Content: domain.BriefContent{
+			Telemetry: []domain.BriefItem{{Name: "Logs", Value: "Structured JSON events", Status: "confirmed"}},
+		}},
+	}
+
+	got := briefContext(session)
+	for _, expected := range []string{"<confirmed_brief_facts>", `"section":"Telemetry"`, `"name":"Logs"`, `"value":"Structured JSON events"`, "supersede older conversation messages"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("brief context missing %q: %s", expected, got)
+		}
+	}
+	if strings.LastIndex(got, "<confirmed_brief_facts>") < strings.LastIndex(got, "</session_context>") {
+		t.Fatal("confirmed facts must follow the full session context")
+	}
+}
