@@ -38,6 +38,7 @@ export interface BriefThread {
   id: string;
   sessionId: string;
   focus: BriefFocus;
+  candidateValue: string;
   state: "draft" | "confirmed";
   createdAt: string;
   updatedAt: string;

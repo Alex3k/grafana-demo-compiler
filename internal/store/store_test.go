@@ -87,8 +87,15 @@ func TestBriefThreadPersistsOutsideMainConversation(t *testing.T) {
 	if len(mainMessages) != 0 {
 		t.Fatalf("main messages = %#v, want none", mainMessages)
 	}
-	if err := dataStore.ConfirmBriefThread(ctx, session.ID, thread.ID); err != nil {
+	if err := dataStore.UpdateBriefThreadCandidate(ctx, session.ID, thread.ID, "Structured JSON logs"); err != nil {
 		t.Fatal(err)
+	}
+	brief, err := dataStore.ApplyBriefThread(ctx, session.ID, thread.ID, domain.BriefContent{Telemetry: []domain.BriefItem{{Name: "Logs", Value: "Structured JSON logs", Status: "confirmed"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.Version != 1 || brief.Content.Telemetry[0].Value != "Structured JSON logs" {
+		t.Fatalf("applied brief = %#v", brief)
 	}
 	newDraft, err := dataStore.OpenBriefThread(ctx, session.ID, thread.Focus)
 	if err != nil {

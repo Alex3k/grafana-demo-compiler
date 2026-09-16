@@ -46,13 +46,14 @@ type BriefFocus struct {
 }
 
 type BriefThread struct {
-	ID        string     `json:"id"`
-	SessionID string     `json:"sessionId"`
-	Focus     BriefFocus `json:"focus"`
-	State     string     `json:"state"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
-	Messages  []Message  `json:"messages"`
+	ID             string     `json:"id"`
+	SessionID      string     `json:"sessionId"`
+	Focus          BriefFocus `json:"focus"`
+	CandidateValue string     `json:"candidateValue"`
+	State          string     `json:"state"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+	Messages       []Message  `json:"messages"`
 }
 
 type NarrativeBeat struct {

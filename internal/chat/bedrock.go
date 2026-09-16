@@ -154,7 +154,7 @@ func focusContext(focus *domain.BriefFocus) string {
 	if err != nil {
 		return ""
 	}
-	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe human is iterating this topic in an isolated draft thread. Use the current living brief only as background, address the selected topic directly, and avoid broadening unless a dependency must be surfaced. Do not treat draft statements as confirmed, use the word confirmed for a draft change, claim that the living brief changed, or resume the main conversation. Describe the emerging result as a draft update and help the human converge on concise wording that they can explicitly confirm and apply later.\n</focused_brief_topic>"
+	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe human is iterating this topic in an isolated draft thread. Use the current living brief only as background, address the selected topic directly, and avoid broadening unless a dependency must be surfaced. Do not treat draft statements as confirmed, use the word confirmed for a draft change, claim that the living brief changed, or resume the main conversation. Describe the emerging result as a draft update and help the human converge on concise wording that they can explicitly confirm and apply later. End every response with a `### Proposed brief value` heading followed by one self-contained, concise paragraph containing exactly the value that should replace this topic if the human confirms it. This final section is required, must reflect the latest focused discussion, and must not contain questions.\n</focused_brief_topic>"
 }
 
 func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message, parentGenerationIDs ...string) (BriefResult, error) {

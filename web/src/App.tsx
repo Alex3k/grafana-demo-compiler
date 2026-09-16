@@ -143,6 +143,8 @@ function App() {
         const index = messages.findIndex((message) => message.id === failure.messageId);
         if (index >= 0) messages[index] = { ...messages[index], status: "failed", content: messages[index].content || failure.message };
         setTopicError(failure.message);
+      } else if (streamEvent.event === "candidate_updated") {
+        return { ...current, candidateValue: (streamEvent.data as { value: string }).value, messages };
       }
       return { ...current, messages };
     });
@@ -378,7 +380,7 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
       {error && <div className="topic-error">{error}</div>}
       <div className="topic-confirm-bar">
         <div><strong>Ready to lock this in?</strong><small>Only the agreed result is applied to the living brief.</small></div>
-        <button type="button" onClick={onConfirm} disabled={busy || confirming || !messages.some((message) => message.role === "assistant" && message.status === "complete")}>{confirming ? "Applying…" : "Confirm and apply"}</button>
+        <button type="button" onClick={onConfirm} disabled={busy || confirming || !thread.candidateValue.trim()}>{confirming ? "Applying…" : "Confirm and apply"}</button>
       </div>
       <form className="topic-composer" onSubmit={submit}>
         <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {

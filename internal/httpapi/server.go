@@ -315,6 +315,10 @@ func (s *Server) createBriefThreadMessage(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusInternalServerError, "Could not save focused message", err)
 		return
 	}
+	if err := s.store.UpdateBriefThreadCandidate(r.Context(), session.ID, thread.ID, ""); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not reset the proposed brief value", err)
+		return
+	}
 	activity, _ := s.store.CreateBriefThreadMessage(r.Context(), thread.ID, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Refining " + thread.Focus.Label, Status: "complete"})
 	assistantMessage, err := s.store.CreateBriefThreadMessage(r.Context(), thread.ID, domain.Message{SessionID: session.ID, Role: "assistant", Kind: "message", Status: "streaming"})
 	if err != nil {
@@ -327,6 +331,7 @@ func (s *Server) createBriefThreadMessage(w http.ResponseWriter, r *http.Request
 	_ = writeEvent(w, flusher, "user_message", userMessage)
 	_ = writeEvent(w, flusher, "activity", activity)
 	_ = writeEvent(w, flusher, "message_started", assistantMessage)
+	_ = writeEvent(w, flusher, "candidate_updated", map[string]string{"value": ""})
 
 	if decision := deploymentguard.CheckDeploymentRequest(input.Content); decision.Blocked {
 		content := fmt.Sprintf("Application deployment to %s is blocked by the MVP's local-only guard. This topic can only describe a local Docker Compose application; the per-session Grafana Cloud stack remains managed through `gcx`.", decision.Target)
@@ -357,11 +362,21 @@ func (s *Server) createBriefThreadMessage(w http.ResponseWriter, r *http.Request
 	}
 	assistantMessage.Content = result.Text
 	assistantMessage.Status = "complete"
+	candidate, ok := focusedCandidate(result.Text)
+	if !ok {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "The focused response did not include a proposed brief value. Please retry your message.", errors.New("focused response missing proposed brief value"))
+		return
+	}
 	if err := s.store.UpdateBriefThreadMessage(r.Context(), assistantMessage.ID, result.Text, "complete"); err != nil {
 		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "Could not save the focused response", err)
 		return
 	}
+	if err := s.store.UpdateBriefThreadCandidate(r.Context(), session.ID, thread.ID, candidate); err != nil {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "Could not save the proposed brief value", err)
+		return
+	}
 	_ = writeEvent(w, flusher, "message_completed", assistantMessage)
+	_ = writeEvent(w, flusher, "candidate_updated", map[string]string{"value": candidate})
 	_ = writeEvent(w, flusher, "turn_completed", map[string]string{"threadId": thread.ID})
 }
 
@@ -380,39 +395,22 @@ func (s *Server) confirmBriefThread(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusConflict, "This focused brief chat is already confirmed", nil)
 		return
 	}
-	transcript := focusedTranscript(thread.Messages)
-	if transcript == "" {
-		s.writeError(w, http.StatusBadRequest, "Discuss this topic before confirming it", nil)
+	if strings.TrimSpace(thread.CandidateValue) == "" {
+		s.writeError(w, http.StatusBadRequest, "Discuss this topic until there is a proposed brief value before confirming it", nil)
 		return
 	}
-	mainMessages, err := s.store.ListMessages(r.Context(), session.ID)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Could not load the main conversation", err)
+	if session.Brief == nil {
+		s.writeError(w, http.StatusConflict, "The living brief is not ready for a focused confirmation", nil)
 		return
 	}
-	confirmation := domain.Message{
-		SessionID: session.ID,
-		Role:      "user",
-		Kind:      "message",
-		Content:   fmt.Sprintf("The human explicitly clicked Confirm and apply for the living brief topic %q. Incorporate the agreed outcome from this isolated focused discussion into that topic and mark it confirmed. Do not treat unrelated draft topics as confirmed.\n\nFocused discussion:\n%s", thread.Focus.Label, transcript),
-		Status:    "complete",
-	}
-	result, err := s.chat.BuildBrief(r.Context(), session, append(mainMessages, confirmation))
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Could not apply the confirmed topic", err)
-		return
-	}
-	if !markBriefTopicConfirmed(&result.Content, thread.Focus.Label) {
+	content := session.Brief.Content
+	if !applyBriefTopic(&content, thread.Focus.Label, thread.CandidateValue) {
 		s.writeError(w, http.StatusUnprocessableEntity, "The confirmed topic could not be matched in the living brief", nil)
 		return
 	}
-	brief, err := s.store.SaveBrief(r.Context(), session.ID, result.Content)
+	brief, err := s.store.ApplyBriefThread(r.Context(), session.ID, thread.ID, content)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Could not save the confirmed topic", err)
-		return
-	}
-	if err := s.store.ConfirmBriefThread(r.Context(), session.ID, thread.ID); err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Could not lock the confirmed topic", err)
 		return
 	}
 	thread.State = "confirmed"
@@ -576,21 +574,20 @@ func validateBriefFocus(focus *domain.BriefFocus) error {
 	return nil
 }
 
-func focusedTranscript(messages []domain.Message) string {
-	var transcript strings.Builder
-	for _, message := range messages {
-		if message.Kind != "message" || message.Status != "complete" || (message.Role != "user" && message.Role != "assistant") {
-			continue
-		}
-		if transcript.Len() > 0 {
-			transcript.WriteString("\n\n")
-		}
-		transcript.WriteString(strings.ToUpper(message.Role[:1]) + message.Role[1:] + ": " + message.Content)
+func focusedCandidate(response string) (string, bool) {
+	const heading = "### Proposed brief value"
+	index := strings.LastIndex(response, heading)
+	if index < 0 {
+		return "", false
 	}
-	return transcript.String()
+	value := strings.TrimSpace(response[index+len(heading):])
+	if value == "" || utf8.RuneCountInString(value) > 8_000 {
+		return "", false
+	}
+	return value, true
 }
 
-func markBriefTopicConfirmed(content *domain.BriefContent, label string) bool {
+func applyBriefTopic(content *domain.BriefContent, label, value string) bool {
 	core := map[string]*domain.BriefItem{
 		"Audience":            &content.Audience,
 		"Company":             &content.Company,
@@ -601,6 +598,7 @@ func markBriefTopicConfirmed(content *domain.BriefContent, label string) bool {
 		"Simulation boundary": &content.Scope.SimulationBoundary,
 	}
 	if item := core[label]; item != nil {
+		item.Value = value
 		item.Status = "confirmed"
 		return true
 	}
@@ -622,6 +620,7 @@ func markBriefTopicConfirmed(content *domain.BriefContent, label string) bool {
 	}
 	for index := range *items {
 		if strings.EqualFold((*items)[index].Name, name) {
+			(*items)[index].Value = value
 			(*items)[index].Status = "confirmed"
 			return true
 		}
