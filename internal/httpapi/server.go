@@ -14,6 +14,7 @@ import (
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
+	deploymentguard "github.com/Alex3k/grafana-demo-compiler/internal/guard"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
 )
@@ -35,6 +36,9 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 	mux.HandleFunc("GET /api/sessions/{id}", server.getSession)
 	mux.HandleFunc("PATCH /api/sessions/{id}", server.renameSession)
 	mux.HandleFunc("POST /api/sessions/{id}/messages", server.createMessage)
+	mux.HandleFunc("POST /api/sessions/{id}/brief-threads", server.openBriefThread)
+	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/messages", server.createBriefThreadMessage)
+	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/confirm", server.confirmBriefThread)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "API route not found"})
 	})
@@ -173,6 +177,10 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 			session.Title = title
 		}
 	}
+	if decision := deploymentguard.CheckDeploymentRequest(input.Content); decision.Blocked {
+		s.handleBlockedDeployment(r.Context(), w, flusher, session, userMessage, decision)
+		return
+	}
 
 	activity, _ := s.store.CreateMessage(r.Context(), domain.Message{
 		SessionID: session.ID,
@@ -235,10 +243,228 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.FinishOperation(r.Context(), operation.ID, "complete", "Assistant response complete", "")
 	writeEvent(w, flusher, "message_completed", assistantMessage)
-	s.updateLivingBrief(r.Context(), w, flusher, session)
+	s.updateLivingBrief(r.Context(), w, flusher, session, result.GenerationID)
 }
 
-func (s *Server) updateLivingBrief(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session) {
+func (s *Server) openBriefThread(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Focus domain.BriefFocus `json:"focus"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid brief thread request", err)
+		return
+	}
+	if err := validateBriefFocus(&input.Focus); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	if _, err := s.store.GetSession(r.Context(), r.PathValue("id")); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		s.writeError(w, status, "Session not found", err)
+		return
+	}
+	thread, err := s.store.OpenBriefThread(r.Context(), r.PathValue("id"), input.Focus)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not open focused brief chat", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+func (s *Server) createBriefThreadMessage(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.writeError(w, http.StatusInternalServerError, "Streaming is unavailable", nil)
+		return
+	}
+	var input struct {
+		Content string `json:"content"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid focused message request", err)
+		return
+	}
+	input.Content = strings.TrimSpace(input.Content)
+	if input.Content == "" {
+		s.writeError(w, http.StatusBadRequest, "A message is required", nil)
+		return
+	}
+	if utf8.RuneCountInString(input.Content) > 32_000 {
+		s.writeError(w, http.StatusRequestEntityTooLarge, "Message exceeds 32,000 characters", nil)
+		return
+	}
+	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "Session not found", err)
+		return
+	}
+	thread, err := s.store.GetBriefThread(r.Context(), session.ID, r.PathValue("threadID"))
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "Focused brief chat not found", err)
+		return
+	}
+	if thread.State != "draft" {
+		s.writeError(w, http.StatusConflict, "This focused brief chat is already confirmed", nil)
+		return
+	}
+	userMessage, err := s.store.CreateBriefThreadMessage(r.Context(), thread.ID, domain.Message{SessionID: session.ID, Role: "user", Kind: "message", Content: input.Content, Status: "complete"})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not save focused message", err)
+		return
+	}
+	if err := s.store.UpdateBriefThreadCandidate(r.Context(), session.ID, thread.ID, ""); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not reset the proposed brief value", err)
+		return
+	}
+	activity, _ := s.store.CreateBriefThreadMessage(r.Context(), thread.ID, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Refining " + thread.Focus.Label, Status: "complete"})
+	assistantMessage, err := s.store.CreateBriefThreadMessage(r.Context(), thread.ID, domain.Message{SessionID: session.ID, Role: "assistant", Kind: "message", Status: "streaming"})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not start focused response", err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	_ = writeEvent(w, flusher, "user_message", userMessage)
+	_ = writeEvent(w, flusher, "activity", activity)
+	_ = writeEvent(w, flusher, "message_started", assistantMessage)
+	_ = writeEvent(w, flusher, "candidate_updated", map[string]string{"value": ""})
+
+	if decision := deploymentguard.CheckDeploymentRequest(input.Content); decision.Blocked {
+		content := fmt.Sprintf("Application deployment to %s is blocked by the MVP's local-only guard. This topic can only describe a local Docker Compose application; the per-session Grafana Cloud stack remains managed through `gcx`.", decision.Target)
+		assistantMessage.Content = content
+		assistantMessage.Status = "complete"
+		_ = s.store.UpdateBriefThreadMessage(r.Context(), assistantMessage.ID, content, "complete")
+		_ = writeEvent(w, flusher, "message_completed", assistantMessage)
+		_ = writeEvent(w, flusher, "turn_completed", map[string]string{"threadId": thread.ID})
+		return
+	}
+
+	messages, err := s.store.ListBriefThreadMessages(r.Context(), thread.ID)
+	if err != nil {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "Could not reload focused conversation", err)
+		return
+	}
+	var response strings.Builder
+	result, err := s.chat.StreamFocused(r.Context(), session, messages, thread.Focus, func(delta string) error {
+		response.WriteString(delta)
+		if err := s.store.UpdateBriefThreadMessage(r.Context(), assistantMessage.ID, response.String(), "streaming"); err != nil {
+			return err
+		}
+		return writeEvent(w, flusher, "delta", map[string]string{"messageId": assistantMessage.ID, "delta": delta})
+	})
+	if err != nil {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, friendlyChatError(err), err)
+		return
+	}
+	assistantMessage.Content = result.Text
+	assistantMessage.Status = "complete"
+	candidate, ok := focusedCandidate(result.Text)
+	if !ok {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "The focused response did not include a proposed brief value. Please retry your message.", errors.New("focused response missing proposed brief value"))
+		return
+	}
+	if err := s.store.UpdateBriefThreadMessage(r.Context(), assistantMessage.ID, result.Text, "complete"); err != nil {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "Could not save the focused response", err)
+		return
+	}
+	if err := s.store.UpdateBriefThreadCandidate(r.Context(), session.ID, thread.ID, candidate); err != nil {
+		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "Could not save the proposed brief value", err)
+		return
+	}
+	_ = writeEvent(w, flusher, "message_completed", assistantMessage)
+	_ = writeEvent(w, flusher, "candidate_updated", map[string]string{"value": candidate})
+	_ = writeEvent(w, flusher, "turn_completed", map[string]string{"threadId": thread.ID})
+}
+
+func (s *Server) confirmBriefThread(w http.ResponseWriter, r *http.Request) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "Session not found", err)
+		return
+	}
+	thread, err := s.store.GetBriefThread(r.Context(), session.ID, r.PathValue("threadID"))
+	if err != nil {
+		s.writeError(w, http.StatusNotFound, "Focused brief chat not found", err)
+		return
+	}
+	if thread.State != "draft" {
+		s.writeError(w, http.StatusConflict, "This focused brief chat is already confirmed", nil)
+		return
+	}
+	if strings.TrimSpace(thread.CandidateValue) == "" {
+		s.writeError(w, http.StatusBadRequest, "Discuss this topic until there is a proposed brief value before confirming it", nil)
+		return
+	}
+	if session.Brief == nil {
+		s.writeError(w, http.StatusConflict, "The living brief is not ready for a focused confirmation", nil)
+		return
+	}
+	content := session.Brief.Content
+	if !applyBriefTopic(&content, thread.Focus.Label, thread.CandidateValue) {
+		s.writeError(w, http.StatusUnprocessableEntity, "The confirmed topic could not be matched in the living brief", nil)
+		return
+	}
+	brief, err := s.store.ApplyBriefThread(r.Context(), session.ID, thread.ID, content)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not save the confirmed topic", err)
+		return
+	}
+	thread.State = "confirmed"
+	activity, _ := s.store.CreateMessage(r.Context(), domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Confirmed brief topic: " + thread.Focus.Label, Status: "complete"})
+	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "brief": brief, "activity": activity})
+}
+
+func (s *Server) handleBlockedDeployment(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session, userMessage domain.Message, decision deploymentguard.Decision) {
+	activity, _ := s.store.CreateMessage(ctx, domain.Message{
+		SessionID: session.ID,
+		Role:      "system",
+		Kind:      "activity",
+		Content:   "Local-only deployment guard blocked the remote application target",
+		Status:    "complete",
+	})
+	operation, err := s.store.CreateOperation(ctx, domain.Operation{
+		SessionID: session.ID,
+		Kind:      "deployment_guard",
+		Status:    "running",
+		Summary:   "Checking the requested application deployment target",
+	})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not record deployment guard outcome", err)
+		return
+	}
+	content := fmt.Sprintf("Application deployment to %s is blocked by the MVP's local-only guard. I can build and run the application locally with Docker Compose and model the requested architecture or failure mode there. The required per-session Grafana Cloud stack and Grafana resources will still be created and managed through `gcx`.", decision.Target)
+	assistantMessage, err := s.store.CreateMessage(ctx, domain.Message{
+		SessionID: session.ID,
+		Role:      "assistant",
+		Kind:      "message",
+		Content:   content,
+		Status:    "complete",
+	})
+	if err != nil {
+		_ = s.store.FinishOperation(ctx, operation.ID, "failed", "Could not save guard response", err.Error())
+		s.writeError(w, http.StatusInternalServerError, "Could not save guard response", err)
+		return
+	}
+	_ = s.store.FinishOperation(ctx, operation.ID, "complete", "Remote application deployment blocked", "")
+	s.o11y.RecordDeploymentGuard(ctx, session.ID, decision.Target)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	_ = writeEvent(w, flusher, "user_message", userMessage)
+	_ = writeEvent(w, flusher, "activity", activity)
+	_ = writeEvent(w, flusher, "message_completed", assistantMessage)
+	s.updateLivingBrief(ctx, w, flusher, session)
+}
+
+func (s *Server) updateLivingBrief(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session, parentGenerationIDs ...string) {
+	defer func() {
+		_ = writeEvent(w, flusher, "turn_completed", map[string]string{"sessionId": session.ID})
+	}()
 	activity, _ := s.store.CreateMessage(ctx, domain.Message{
 		SessionID: session.ID,
 		Role:      "system",
@@ -260,7 +486,26 @@ func (s *Server) updateLivingBrief(ctx context.Context, w http.ResponseWriter, f
 	messages, err := s.store.ListMessages(ctx, session.ID)
 	if err == nil {
 		var content domain.BriefContent
-		content, err = s.chat.BuildBrief(ctx, session, messages)
+		var result chat.BriefResult
+		result, err = s.chat.BuildBrief(ctx, session, messages, parentGenerationIDs...)
+		if err == nil {
+			content = result.Content
+			if content.Acceptance.Accepted {
+				evaluationActivity, _ := s.store.CreateMessage(ctx, domain.Message{
+					SessionID: session.ID,
+					Role:      "system",
+					Kind:      "activity",
+					Content:   "Evaluating the accepted plan against the demo requirement",
+					Status:    "complete",
+				})
+				_ = writeEvent(w, flusher, "activity", evaluationActivity)
+				var evaluation chat.EvaluationResult
+				evaluation, err = s.chat.EvaluatePlan(ctx, session, content, messages, result.GenerationID)
+				if err == nil {
+					content.Acceptance.Evaluation = evaluation.Evaluation
+				}
+			}
+		}
 		if err == nil {
 			var brief domain.LivingBrief
 			brief, err = s.store.SaveBrief(ctx, session.ID, content)
@@ -305,6 +550,82 @@ func (s *Server) finishStreamWithError(ctx context.Context, w http.ResponseWrite
 	_ = s.store.UpdateMessage(ctx, message.ID, content, "failed")
 	_ = s.store.FinishOperation(ctx, operation.ID, "failed", public, err.Error())
 	_ = writeEvent(w, flusher, "error", map[string]string{"messageId": message.ID, "message": public})
+}
+
+func (s *Server) finishBriefThreadStreamWithError(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, message domain.Message, public string, err error) {
+	s.log.Error("focused assistant response failed", "session", message.SessionID, "message", message.ID, "error", err)
+	content := message.Content
+	if content == "" {
+		content = public
+	}
+	_ = s.store.UpdateBriefThreadMessage(ctx, message.ID, content, "failed")
+	_ = writeEvent(w, flusher, "error", map[string]string{"messageId": message.ID, "message": public})
+}
+
+func validateBriefFocus(focus *domain.BriefFocus) error {
+	focus.Label = strings.TrimSpace(focus.Label)
+	focus.Value = strings.TrimSpace(focus.Value)
+	if focus.Label == "" || utf8.RuneCountInString(focus.Label) > 120 || utf8.RuneCountInString(focus.Value) > 8_000 {
+		return errors.New("Invalid brief topic context")
+	}
+	if focus.Status != "proposed" && focus.Status != "confirmed" {
+		return errors.New("Brief topic must be proposed or confirmed")
+	}
+	return nil
+}
+
+func focusedCandidate(response string) (string, bool) {
+	const heading = "### Proposed brief value"
+	index := strings.LastIndex(response, heading)
+	if index < 0 {
+		return "", false
+	}
+	value := strings.TrimSpace(response[index+len(heading):])
+	if value == "" || utf8.RuneCountInString(value) > 8_000 {
+		return "", false
+	}
+	return value, true
+}
+
+func applyBriefTopic(content *domain.BriefContent, label, value string) bool {
+	core := map[string]*domain.BriefItem{
+		"Audience":            &content.Audience,
+		"Company":             &content.Company,
+		"Outcome":             &content.Outcome,
+		"Stakes":              &content.Stakes,
+		"Scenario":            &content.Scenario,
+		"Journey":             &content.Journey,
+		"Simulation boundary": &content.Scope.SimulationBoundary,
+	}
+	if item := core[label]; item != nil {
+		item.Value = value
+		item.Status = "confirmed"
+		return true
+	}
+	section, name, found := strings.Cut(label, ": ")
+	if !found {
+		return false
+	}
+	collections := map[string]*[]domain.BriefItem{
+		"Proof points":          &content.ProofPoints,
+		"Included scope":        &content.Scope.Included,
+		"Deliberately excluded": &content.Scope.Excluded,
+		"Services":              &content.Services,
+		"Telemetry":             &content.Telemetry,
+		"Grafana resources":     &content.GrafanaResources,
+	}
+	items := collections[section]
+	if items == nil {
+		return false
+	}
+	for index := range *items {
+		if strings.EqualFold((*items)[index].Name, name) {
+			(*items)[index].Value = value
+			(*items)[index].Status = "confirmed"
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) writeError(w http.ResponseWriter, status int, message string, err error) {

@@ -28,6 +28,23 @@ export interface BriefItem {
   status: BriefStatus;
 }
 
+export interface BriefFocus {
+  label: string;
+  value: string;
+  status: BriefStatus;
+}
+
+export interface BriefThread {
+  id: string;
+  sessionId: string;
+  focus: BriefFocus;
+  candidateValue: string;
+  state: "draft" | "confirmed";
+  createdAt: string;
+  updatedAt: string;
+  messages: Message[];
+}
+
 export interface NarrativeBeat {
   stage: string;
   detail: string;
@@ -46,6 +63,11 @@ export interface LivingBrief {
     scenario: BriefItem;
     journey: BriefItem;
     proofPoints: BriefItem[];
+    scope: {
+      included: BriefItem[];
+      excluded: BriefItem[];
+      simulationBoundary: BriefItem;
+    };
     services: BriefItem[];
     telemetry: BriefItem[];
     grafanaResources: BriefItem[];
@@ -56,6 +78,10 @@ export interface LivingBrief {
     prototypeOffer: {
       ready: boolean;
       summary: string;
+      included: string[];
+      excluded: string[];
+      realComponents: string[];
+      simulatedComponents: string[];
       services: string[];
       scenario: string;
       telemetry: string[];
@@ -69,6 +95,9 @@ export interface LivingBrief {
         result: "" | "meets" | "partially_meets" | "does_not_meet";
         explanation: string;
         missing: string[];
+        contradictions: string[];
+        unnecessaryScope: string[];
+        risks: string[];
         evidence: string[];
       };
     };
