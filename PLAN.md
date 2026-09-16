@@ -955,7 +955,6 @@ These choices are intentionally not treated as approved requirements yet:
 - the on-disk root and retention policy for generated session projects;
 - whether Alloy starts in Milestone 1 without remote credentials, or is placed
   behind a Compose profile until Step 5 configures the demo stack;
-- the LLM provider/model abstraction and local credential configuration;
 - the exact `gcx` command sequence and naming convention for creating a
   per-session Grafana Cloud stack;
 - whether three services is also the default, with additional services added
@@ -999,3 +998,9 @@ scope boundary requires human confirmation and a decision-log entry.
 - Ask when the user's domain or another material requirement is unclear.
 - Do not generate unit or integration tests for application services.
 - Exclude AutoBrenda completely because it is a separate project.
+- Use Amazon Bedrock as the compiler's LLM service, selected through
+  `AWS_REGION` and `BEDROCK_MODEL_ID` and authenticated with the standard AWS
+  credential chain.
+- Use Grafana's Go AI SDK Bedrock provider and its provider-neutral
+  `middleware/agentobservability` streaming integration instead of calling the
+  AWS Bedrock SDK and manually recording generations.
