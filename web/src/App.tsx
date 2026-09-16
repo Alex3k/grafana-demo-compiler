@@ -296,7 +296,7 @@ function BriefPanel({ brief }: { brief: LivingBrief }) {
       <BriefItems title="Telemetry" items={content.telemetry} />
       <BriefItems title="Grafana resources" items={content.grafanaResources} />
       {!!content.narrative.length && <BriefSection title={`Narrative · ${content.narrative.reduce((total, beat) => total + beat.minutes, 0)} min`}><ol className="narrative-list">{content.narrative.map((beat) => <li key={`${beat.stage}-${beat.detail}`}><strong>{beat.stage}</strong><span>{beat.detail}</span><small>{beat.minutes}m</small></li>)}</ol></BriefSection>}
-      <BriefSection title="Architecture"><MermaidDiagram source={content.mermaid} /></BriefSection>
+      <ArchitectureSection source={content.mermaid} />
       {!!content.openQuestions.length && <BriefSection title={`Open questions · ${content.openQuestions.length}`} open><ul className="question-list">{content.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></BriefSection>}
       {!!content.decisions.length && <BriefSection title="Decisions"><ul className="decision-list">{content.decisions.map((decision) => <li key={`${decision.summary}-${decision.evidence}`}><StatusPill status={decision.status} /> <span>{decision.summary}</span></li>)}</ul></BriefSection>}
       <PrototypeCard offer={content.prototypeOffer} />
@@ -321,6 +321,34 @@ function BriefSection({ title, open = false, children }: { title: string; open?:
 
 function StatusPill({ status }: { status: string }) {
   return <span className={`brief-status status-${status}`}>{status}</span>;
+}
+
+function ArchitectureSection({ source }: { source: string }) {
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!expanded) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setExpanded(false);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [expanded]);
+  return (
+    <>
+      <BriefSection title="Architecture">
+        {source && <div className="architecture-actions"><button type="button" onClick={() => setExpanded(true)}>Open large</button></div>}
+        <MermaidDiagram source={source} />
+      </BriefSection>
+      {expanded && (
+        <div className="architecture-overlay" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) setExpanded(false); }}>
+          <section className="architecture-dialog" role="dialog" aria-modal="true" aria-label="Demo architecture">
+            <header><div><span>DEMO ARCHITECTURE</span><strong>System view</strong></div><button type="button" onClick={() => setExpanded(false)} aria-label="Close architecture">×</button></header>
+            <div className="architecture-canvas"><MermaidDiagram source={source} /></div>
+          </section>
+        </div>
+      )}
+    </>
+  );
 }
 
 function MermaidDiagram({ source }: { source: string }) {
