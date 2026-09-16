@@ -84,9 +84,10 @@ The user-visible states are:
 Draft -> Ready -> Generated -> Running -> Verified
 ```
 
-## Demo specification
+## Working brief
 
-Every revision records:
+The compiler maintains a lightweight working brief rather than requiring a
+complete specification before anything can be built. It records:
 
 - Audience and technical depth.
 - Company, industry, branding, and terminology.
@@ -95,14 +96,24 @@ Every revision records:
 - Required proof points.
 - Domain-specific user journey.
 - Architecture and service responsibilities.
-- Telemetry requirements.
-- Requested, recommended, and excluded Grafana resources.
+- Important telemetry for telling the story.
+- Agreed and proposed Grafana resources.
 - Scenario trigger, recovery, and reset behavior.
 - Timed narrative and presenter flow.
 - Acceptance criteria.
 - Open questions and confirmed decisions.
 
-A revision cannot become `Ready` while material questions remain unresolved.
+Items in the brief can be unknown, proposed, or confirmed. The assistant asks
+when uncertainty would materially change what gets built, but it does not make
+the user finish every detail before showing useful work.
+
+Architecture is stored as Mermaid source and rendered with Mermaid.js in the
+UI. Plain-text architecture diagrams are not used.
+
+When the audience, desired outcome, core scenario, primary journey, and a small
+architecture are understood well enough, the assistant offers to build an
+initial prototype. The user can accept the offer, ask for a smaller prototype,
+or continue planning.
 
 ## Generated demo contract
 
@@ -117,26 +128,31 @@ Every generated demo contains:
 - Realistic traffic or sensor simulation.
 - Repeatable baseline, trigger, recovery, and reset controls.
 
+Generation is iterative. Early prototypes can implement only the main vertical
+slice. Feedback updates the working brief, Mermaid architecture, and affected
+files. The assistant prefers targeted edits and uses a full regeneration only
+when the architecture or direction changes substantially.
+
+No unit or integration tests are generated for application services. Minimum
+checks are Go formatting and compilation, Docker Compose validation, presence
+of required services and health endpoints, and a scan for embedded credentials
+or unsupported remote deployment files.
+
 Manufacturing and IoT will provide the initial development fixture. This is not
 a domain imposed on users; the actual demo must follow the approved user intent.
 
-## Grafana resource contract
+## Observability and Grafana proposal
 
-The approved specification separates Grafana artifacts into:
+The assistant proposes a concise set of telemetry and Grafana resources that is
+enough to tell the requested story. The proposal briefly explains what signals
+matter, which services produce them, which resources are useful, and why they
+help the narrative.
 
-```yaml
-grafanaArtifacts:
-  requested: []
-  recommended: []
-  excluded: []
-```
-
-- Explicit user requests are authoritative.
-- Recommendations are optional and require approval.
-- There is no fixed dashboard, SLO, or alert count.
-- When no scope is supplied, the assistant proposes the smallest
-  story-complete set and asks for approval.
-- Every resource must support a narrative beat or proof point.
+- Avoid producing telemetry merely because it is possible.
+- Avoid large collections of dashboards, alerts, or SLOs.
+- Start with the smallest story-complete set.
+- Explicit user requests are authoritative and can expand the set.
+- Recommendations remain optional until the user agrees.
 - `gcx` is responsible for stack creation, resource discovery, validation,
   dry-run, mutation, reconciliation, and verification.
 - Grafana changes are previewed before approval.
@@ -185,35 +201,47 @@ Deliver:
 
 Meaningful outcome: a user can hold and resume a collaborative conversation.
 
-### Step 2: Specification and narrative
+### Step 2: Collaborative planning and early prototyping
 
 Deliver:
 
-- A living structured specification.
+- A lightweight living brief with unknown, proposed, and confirmed items.
 - Targeted clarification questions.
-- A narrative of no more than ten minutes.
-- An architecture proposal.
-- Requested, recommended, and excluded Grafana resources.
-- Plan approval and transition from `Draft` to `Ready`.
-- Requirement evaluation on the completed plan.
+- Architecture stored as Mermaid source and rendered with Mermaid.js.
+- A concise narrative outline that matures toward ten minutes through
+  iteration.
+- A small observability and Grafana resource proposal focused on the story.
+- An offer to build a prototype as soon as there is enough context for a
+  coherent vertical slice.
+- The option to continue planning instead of generating immediately.
+- Requirement evaluation when the user chooses to approve the completed plan.
 
-Meaningful outcome: a user can collaboratively produce and approve a complete
-demo design.
+Meaningful outcome: a user can shape the idea conversationally and choose when
+to turn it into something tangible without waiting for every detail to be
+final.
 
-### Step 3: Local project generation
+### Step 3: Iterative local prototype generation
 
 Deliver:
 
-- At least three generated Go services.
+- A template-first Go foundation with domain-specific behavior generated from
+  the working brief.
+- An initial vertical slice with at least three generated Go services.
 - MySQL.
 - Alloy configuration.
 - Dockerfiles and Docker Compose.
-- Seed data, health endpoints, and an artifact manifest.
-- Static validation of the generated project.
+- Relevant seed data, health endpoints, and an artifact manifest.
+- Repeated prototype iterations inside the active draft.
+- Targeted edits to affected services, data, telemetry, and Mermaid
+  architecture after user feedback.
+- A concise change summary for every iteration.
+- Minimum checks only: `gofmt`, `go build ./...`, `docker compose config`,
+  required-file checks, and credential and remote-deployment scans.
+- No generated unit or integration tests for application services.
 - The local-only deployment guard.
 
-Meaningful outcome: an approved plan becomes a complete, inspectable local
-project.
+Meaningful outcome: a working brief becomes an inspectable prototype that the
+user can repeatedly refine before accepting it as the generated demo.
 
 ### Step 4: Local execution
 
@@ -226,6 +254,11 @@ Deliver:
 - A five-minute target from approved revision to usable local demo.
 
 Meaningful outcome: the user can run the generated demo locally.
+
+Once Steps 1 through 4 are available, Steps 2, 3, and 4 operate as one feedback
+loop: discuss, prototype, run, review, and revise. Their numbering describes the
+order in which the product capabilities are delivered, not a waterfall user
+journey.
 
 ### Step 5: Grafana Cloud stack and telemetry
 
@@ -296,8 +329,9 @@ Milestone 1 consists of **Steps 1 through 4**:
 4. Local execution.
 
 At the end of Milestone 1, a user can discuss a demo, resolve ambiguities,
-approve a persistent plan, generate a Go/MySQL/Alloy project, and run it locally
-with Docker Compose. Requests to deploy the application remotely are blocked.
+request an early prototype, iteratively refine a Go/MySQL/Alloy project, and run
+it locally with Docker Compose. The user can continue planning instead of
+prototyping, and requests to deploy the application remotely are blocked.
 
 Grafana Cloud stack creation, live telemetry verification, generated Grafana
 resources, presenter tooling, and full reconciliation remain subsequent
@@ -321,3 +355,10 @@ milestones.
   `democompiler` gcx context for Agent Observability.
 - Use one requirement-alignment evaluation and one local-only deployment guard.
 - Approve Milestone 1 as Steps 1 through 4.
+- Use Mermaid.js for architecture diagrams.
+- Treat Steps 2 through 4 as an iterative prototype feedback loop rather than a
+  waterfall sequence.
+- Keep observability and Grafana planning lightweight and story-focused.
+- Generate only the smallest useful telemetry and resource set unless the user
+  requests more.
+- Do not generate unit or integration tests for application services.
