@@ -53,3 +53,48 @@ func TestSessionPersistsAndStreamingMessageIsRecovered(t *testing.T) {
 		t.Fatalf("restored status = %q, want interrupted", restored.Messages[0].Status)
 	}
 }
+
+func TestBriefThreadPersistsOutsideMainConversation(t *testing.T) {
+	ctx := context.Background()
+	dataStore, err := Open(ctx, filepath.Join(t.TempDir(), "compiler.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+	session, err := dataStore.CreateSession(ctx, "Camera fleet demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err := dataStore.OpenBriefThread(ctx, session.ID, domain.BriefFocus{Label: "Telemetry: Structured logs", Value: "Plain-text logs", Status: "proposed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dataStore.CreateBriefThreadMessage(ctx, thread.ID, domain.Message{SessionID: session.ID, Role: "user", Kind: "message", Content: "Use JSON logs", Status: "complete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := dataStore.OpenBriefThread(ctx, session.ID, thread.Focus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ID != thread.ID || len(reopened.Messages) != 1 {
+		t.Fatalf("reopened thread = %#v", reopened)
+	}
+	mainMessages, err := dataStore.ListMessages(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mainMessages) != 0 {
+		t.Fatalf("main messages = %#v, want none", mainMessages)
+	}
+	if err := dataStore.ConfirmBriefThread(ctx, session.ID, thread.ID); err != nil {
+		t.Fatal(err)
+	}
+	newDraft, err := dataStore.OpenBriefThread(ctx, session.ID, thread.Focus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newDraft.ID == thread.ID {
+		t.Fatal("confirmed thread was reused instead of creating a new draft")
+	}
+}

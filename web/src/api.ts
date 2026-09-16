@@ -1,4 +1,4 @@
-import type { BriefFocus, Health, Message, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefThread, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -24,18 +24,40 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ title }),
     }),
+  openBriefThread: (sessionId: string, focus: BriefFocus) =>
+    json<BriefThread>(`/api/sessions/${sessionId}/brief-threads`, {
+      method: "POST",
+      body: JSON.stringify({ focus }),
+    }),
+  confirmBriefThread: (sessionId: string, threadId: string) =>
+    json<{ thread: BriefThread; brief: LivingBrief; activity: Message }>(`/api/sessions/${sessionId}/brief-threads/${threadId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
 };
 
 export async function streamMessage(
   sessionId: string,
   content: string,
-  focus: BriefFocus | undefined,
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
-  const response = await fetch(`/api/sessions/${sessionId}/messages`, {
+  return stream(`/api/sessions/${sessionId}/messages`, content, onEvent);
+}
+
+export async function streamBriefThreadMessage(
+  sessionId: string,
+  threadId: string,
+  content: string,
+  onEvent: (event: StreamEvent) => void,
+): Promise<void> {
+  return stream(`/api/sessions/${sessionId}/brief-threads/${threadId}/messages`, content, onEvent);
+}
+
+async function stream(path: string, content: string, onEvent: (event: StreamEvent) => void): Promise<void> {
+  const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, focus }),
+    body: JSON.stringify({ content }),
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };

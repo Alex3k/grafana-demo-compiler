@@ -50,7 +50,7 @@ func TestSanitizeAssistantTextRemovesInternalCompletionMarker(t *testing.T) {
 
 func TestFocusContextKeepsTopicInsideMainSession(t *testing.T) {
 	got := focusContext(&domain.BriefFocus{Label: "Scenario", Value: "A camera fleet loses connectivity", Status: "proposed"})
-	for _, expected := range []string{"<focused_brief_topic>", `"label":"Scenario"`, `"status":"proposed"`, "same demo session"} {
+	for _, expected := range []string{"<focused_brief_topic>", `"label":"Scenario"`, `"status":"proposed"`, "isolated draft thread", "explicitly confirm"} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("focus context missing %q: %s", expected, got)
 		}

@@ -34,6 +34,16 @@ export interface BriefFocus {
   status: BriefStatus;
 }
 
+export interface BriefThread {
+  id: string;
+  sessionId: string;
+  focus: BriefFocus;
+  state: "draft" | "confirmed";
+  createdAt: string;
+  updatedAt: string;
+  messages: Message[];
+}
+
 export interface NarrativeBeat {
   stage: string;
   detail: string;

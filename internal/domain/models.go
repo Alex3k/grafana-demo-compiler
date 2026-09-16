@@ -45,6 +45,16 @@ type BriefFocus struct {
 	Status string `json:"status"`
 }
 
+type BriefThread struct {
+	ID        string     `json:"id"`
+	SessionID string     `json:"sessionId"`
+	Focus     BriefFocus `json:"focus"`
+	State     string     `json:"state"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	Messages  []Message  `json:"messages"`
+}
+
 type NarrativeBeat struct {
 	Stage   string `json:"stage"`
 	Detail  string `json:"detail"`

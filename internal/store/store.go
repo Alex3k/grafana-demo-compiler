@@ -88,14 +88,44 @@ CREATE TABLE IF NOT EXISTS living_briefs (
   PRIMARY KEY (session_id, version)
 );
 
+CREATE TABLE IF NOT EXISTS brief_threads (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  value TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('proposed', 'confirmed')),
+  state TEXT NOT NULL CHECK (state IN ('draft', 'confirmed')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS brief_threads_session_label_idx
+  ON brief_threads(session_id, label, updated_at);
+
+CREATE TABLE IF NOT EXISTS brief_thread_messages (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL REFERENCES brief_threads(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  kind TEXT NOT NULL CHECK (kind IN ('message', 'activity')),
+  content TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('streaming', 'complete', 'failed', 'interrupted')),
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS brief_thread_messages_thread_created_idx
+  ON brief_thread_messages(thread_id, created_at, id);
+
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
+UPDATE brief_thread_messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE operations SET status = 'interrupted', ended_at = ? WHERE status = 'running';
 `, formatTime(time.Now().UTC()))
 	if err != nil {
@@ -288,6 +318,120 @@ FROM messages WHERE session_id = ? ORDER BY created_at, id
 	return messages, rows.Err()
 }
 
+func (s *Store) OpenBriefThread(ctx context.Context, sessionID string, focus domain.BriefFocus) (domain.BriefThread, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, session_id, label, value, status, state, created_at, updated_at
+FROM brief_threads
+WHERE session_id = ? AND label = ? AND state = 'draft'
+ORDER BY updated_at DESC LIMIT 1
+`, sessionID, focus.Label)
+	thread, err := scanBriefThread(row)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.BriefThread{}, err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		now := time.Now().UTC()
+		thread = domain.BriefThread{ID: newID(), SessionID: sessionID, Focus: focus, State: "draft", CreatedAt: now, UpdatedAt: now}
+		_, err = s.db.ExecContext(ctx, `
+INSERT INTO brief_threads(id, session_id, label, value, status, state, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, thread.ID, thread.SessionID, thread.Focus.Label, thread.Focus.Value, thread.Focus.Status, thread.State, formatTime(now), formatTime(now))
+		if err != nil {
+			return domain.BriefThread{}, fmt.Errorf("create brief thread: %w", err)
+		}
+	}
+	thread.Messages, err = s.ListBriefThreadMessages(ctx, thread.ID)
+	if err != nil {
+		return domain.BriefThread{}, err
+	}
+	return thread, nil
+}
+
+func (s *Store) GetBriefThread(ctx context.Context, sessionID, threadID string) (domain.BriefThread, error) {
+	thread, err := scanBriefThread(s.db.QueryRowContext(ctx, `
+SELECT id, session_id, label, value, status, state, created_at, updated_at
+FROM brief_threads WHERE id = ? AND session_id = ?
+`, threadID, sessionID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.BriefThread{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.BriefThread{}, err
+	}
+	thread.Messages, err = s.ListBriefThreadMessages(ctx, thread.ID)
+	if err != nil {
+		return domain.BriefThread{}, err
+	}
+	return thread, nil
+}
+
+func (s *Store) CreateBriefThreadMessage(ctx context.Context, threadID string, message domain.Message) (domain.Message, error) {
+	if message.ID == "" {
+		message.ID = newID()
+	}
+	if message.CreatedAt.IsZero() {
+		message.CreatedAt = time.Now().UTC()
+	}
+	now := formatTime(message.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO brief_thread_messages(id, thread_id, session_id, role, kind, content, status, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, message.ID, threadID, message.SessionID, message.Role, message.Kind, message.Content, message.Status, now)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("create brief thread message: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE brief_threads SET updated_at = ? WHERE id = ?`, now, threadID)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("touch brief thread: %w", err)
+	}
+	return message, nil
+}
+
+func (s *Store) UpdateBriefThreadMessage(ctx context.Context, id, content, status string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE brief_thread_messages SET content = ?, status = ? WHERE id = ?`, content, status, id)
+	if err != nil {
+		return fmt.Errorf("update brief thread message: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListBriefThreadMessages(ctx context.Context, threadID string) ([]domain.Message, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, session_id, role, kind, content, status, created_at
+FROM brief_thread_messages WHERE thread_id = ? ORDER BY created_at, id
+`, threadID)
+	if err != nil {
+		return nil, fmt.Errorf("list brief thread messages: %w", err)
+	}
+	defer rows.Close()
+	messages := make([]domain.Message, 0)
+	for rows.Next() {
+		var message domain.Message
+		var created string
+		if err := rows.Scan(&message.ID, &message.SessionID, &message.Role, &message.Kind, &message.Content, &message.Status, &created); err != nil {
+			return nil, fmt.Errorf("scan brief thread message: %w", err)
+		}
+		message.CreatedAt, err = parseTime(created)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+func (s *Store) ConfirmBriefThread(ctx context.Context, sessionID, threadID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE brief_threads SET state = 'confirmed', updated_at = ? WHERE id = ? AND session_id = ? AND state = 'draft'`, formatTime(time.Now().UTC()), threadID, sessionID)
+	if err != nil {
+		return fmt.Errorf("confirm brief thread: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) CreateOperation(ctx context.Context, operation domain.Operation) (domain.Operation, error) {
 	if operation.ID == "" {
 		operation.ID = newID()
@@ -334,6 +478,24 @@ func scanSession(row scanner) (domain.Session, error) {
 		return domain.Session{}, err
 	}
 	return session, nil
+}
+
+func scanBriefThread(row scanner) (domain.BriefThread, error) {
+	var thread domain.BriefThread
+	var created, updated string
+	if err := row.Scan(&thread.ID, &thread.SessionID, &thread.Focus.Label, &thread.Focus.Value, &thread.Focus.Status, &thread.State, &created, &updated); err != nil {
+		return domain.BriefThread{}, err
+	}
+	var err error
+	thread.CreatedAt, err = parseTime(created)
+	if err != nil {
+		return domain.BriefThread{}, err
+	}
+	thread.UpdatedAt, err = parseTime(updated)
+	if err != nil {
+		return domain.BriefThread{}, err
+	}
+	return thread, nil
 }
 
 func newID() string {

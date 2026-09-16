@@ -2,8 +2,8 @@ import { FormEvent, useEffect, useId, useRef, useState } from "react";
 import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, streamMessage } from "./api";
-import type { BriefFocus, BriefItem, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
+import { api, streamBriefThreadMessage, streamMessage } from "./api";
+import type { BriefFocus, BriefItem, BriefThread, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
@@ -23,7 +23,10 @@ function App() {
   const [error, setError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
-  const [briefFocus, setBriefFocus] = useState<(BriefFocus & { startIndex: number }) | null>(null);
+  const [topicThread, setTopicThread] = useState<BriefThread | null>(null);
+  const [topicSending, setTopicSending] = useState(false);
+  const [topicConfirming, setTopicConfirming] = useState(false);
+  const [topicError, setTopicError] = useState("");
   const conversationRef = useRef<HTMLElement>(null);
   const stickToBottomRef = useRef(true);
 
@@ -52,7 +55,7 @@ function App() {
     setError("");
     stickToBottomRef.current = true;
     setActive(await api.session(session.id));
-    setBriefFocus(null);
+    setTopicThread(null);
     setSidebarOpen(false);
   }
 
@@ -61,18 +64,18 @@ function App() {
     stickToBottomRef.current = true;
     const session = await api.createSession();
     setActive({ ...session, messages: [] });
-    setBriefFocus(null);
+    setTopicThread(null);
     await refreshSessions();
     setSidebarOpen(false);
   }
 
-  async function send(content: string, focus?: BriefFocus) {
+  async function send(content: string) {
     if (!active || sending) return;
     stickToBottomRef.current = true;
     setSending(true);
     setError("");
     try {
-      await streamMessage(active.id, content, focus, applyStreamEvent);
+      await streamMessage(active.id, content, applyStreamEvent);
       await refreshSessions();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The message could not be sent.");
@@ -80,6 +83,69 @@ function App() {
       setSending(false);
       void api.health().then(setHealth).catch(() => undefined);
     }
+  }
+
+  async function openTopic(focus: BriefFocus) {
+    if (!active) return;
+    setTopicError("");
+    try {
+      setTopicThread(await api.openBriefThread(active.id, focus));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The focused chat could not be opened.");
+    }
+  }
+
+  async function sendTopic(content: string) {
+    if (!active || !topicThread || topicSending || topicConfirming) return;
+    setTopicSending(true);
+    setTopicError("");
+    try {
+      await streamBriefThreadMessage(active.id, topicThread.id, content, applyTopicStreamEvent);
+    } catch (reason) {
+      setTopicError(reason instanceof Error ? reason.message : "The focused message could not be sent.");
+    } finally {
+      setTopicSending(false);
+    }
+  }
+
+  async function confirmTopic() {
+    if (!active || !topicThread || topicSending || topicConfirming) return;
+    setTopicConfirming(true);
+    setTopicError("");
+    try {
+      const result = await api.confirmBriefThread(active.id, topicThread.id);
+      setActive((current) => current ? { ...current, brief: result.brief, updatedAt: result.brief.updatedAt, messages: [...(current.messages ?? []), result.activity] } : current);
+      setTopicThread(null);
+      await refreshSessions();
+    } catch (reason) {
+      setTopicError(reason instanceof Error ? reason.message : "The topic could not be confirmed.");
+    } finally {
+      setTopicConfirming(false);
+    }
+  }
+
+  function applyTopicStreamEvent(streamEvent: StreamEvent) {
+    if (streamEvent.event === "turn_completed" || streamEvent.event === "error") setTopicSending(false);
+    setTopicThread((current) => {
+      if (!current) return current;
+      const messages = [...current.messages];
+      if (["user_message", "activity", "message_started", "message_completed"].includes(streamEvent.event)) {
+        const incoming = streamEvent.data as Message;
+        const index = messages.findIndex((message) => message.id === incoming.id);
+        if (index >= 0) messages[index] = incoming;
+        else messages.push(incoming);
+      } else if (streamEvent.event === "delta") {
+        const delta = streamEvent.data as { messageId: string; delta: string };
+        const index = messages.findIndex((message) => message.id === delta.messageId);
+        if (index >= 0) messages[index] = { ...messages[index], content: messages[index].content + delta.delta };
+      } else if (streamEvent.event === "error") {
+        const failure = streamEvent.data as { messageId: string; message: string };
+        const index = messages.findIndex((message) => message.id === failure.messageId);
+        if (index >= 0) messages[index] = { ...messages[index], status: "failed", content: messages[index].content || failure.message };
+        setTopicError(failure.message);
+      }
+      return { ...current, messages };
+    });
   }
 
   function applyStreamEvent(streamEvent: StreamEvent) {
@@ -156,15 +222,17 @@ function App() {
           session={active}
           health={health}
           onClose={() => setRailOpen(false)}
-          onFocusTopic={(focus) => setBriefFocus({ ...focus, startIndex: active?.messages?.length ?? 0 })}
+          onFocusTopic={(focus) => void openTopic(focus)}
         />
-        {briefFocus && active && (
+        {topicThread && active && (
           <TopicChat
-            focus={briefFocus}
-            messages={(active.messages ?? []).slice(briefFocus.startIndex)}
-            busy={sending}
-            onSend={(content) => void send(content, { label: briefFocus.label, value: briefFocus.value, status: briefFocus.status })}
-            onClose={() => setBriefFocus(null)}
+            thread={topicThread}
+            busy={topicSending}
+            confirming={topicConfirming}
+            error={topicError}
+            onSend={(content) => void sendTopic(content)}
+            onConfirm={() => void confirmTopic()}
+            onClose={() => setTopicThread(null)}
           />
         )}
       </div>
@@ -270,9 +338,11 @@ function Composer({ busy, onSend }: { busy: boolean; onSend: (content: string) =
   );
 }
 
-function TopicChat({ focus, messages, busy, onSend, onClose }: { focus: BriefFocus; messages: Message[]; busy: boolean; onSend: (content: string) => void; onClose: () => void }) {
+function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose }: { thread: BriefThread; busy: boolean; confirming: boolean; error: string; onSend: (content: string) => void; onConfirm: () => void; onClose: () => void }) {
   const [content, setContent] = useState("");
   const threadRef = useRef<HTMLDivElement>(null);
+  const messages = thread.messages;
+  const focus = thread.focus;
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "auto" });
   }, [messages]);
@@ -292,7 +362,7 @@ function TopicChat({ focus, messages, busy, onSend, onClose }: { focus: BriefFoc
       <div className="topic-context">
         <StatusPill status={focus.status} />
         <p>{focus.value}</p>
-        <small>This conversation updates the same demo session and living brief.</small>
+        <small>This draft is isolated from the main session until you confirm it.</small>
       </div>
       <div className="topic-thread" ref={threadRef}>
         {!messages.length && <div className="topic-empty"><strong>What would you like to change?</strong><p>Respond to this topic, challenge the proposal, or add missing context.</p></div>}
@@ -305,12 +375,17 @@ function TopicChat({ focus, messages, busy, onSend, onClose }: { focus: BriefFoc
           </article>
         ))}
       </div>
+      {error && <div className="topic-error">{error}</div>}
+      <div className="topic-confirm-bar">
+        <div><strong>Ready to lock this in?</strong><small>Only the agreed result is applied to the living brief.</small></div>
+        <button type="button" onClick={onConfirm} disabled={busy || confirming || !messages.some((message) => message.role === "assistant" && message.status === "complete")}>{confirming ? "Applying…" : "Confirm and apply"}</button>
+      </div>
       <form className="topic-composer" onSubmit={submit}>
         <textarea value={content} onChange={(event) => setContent(event.target.value)} onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
         }} placeholder={`Discuss ${focus.label.toLowerCase()}…`} rows={3} autoFocus />
         <button type="submit" disabled={busy || !content.trim()} aria-label="Send focused message">↑</button>
-        <small>{busy ? "Updating this topic · keep typing" : "Enter to send · part of the main session"}</small>
+        <small>{busy ? "Refining this draft · keep typing" : "Enter to send · isolated until confirmed"}</small>
       </form>
     </aside>
   );

@@ -102,7 +102,15 @@ func (s *Service) ModelID() string {
 	return s.modelID
 }
 
-func (s *Service) Stream(ctx context.Context, session domain.Session, messages []domain.Message, focus *domain.BriefFocus, onDelta func(string) error) (Result, error) {
+func (s *Service) Stream(ctx context.Context, session domain.Session, messages []domain.Message, onDelta func(string) error) (Result, error) {
+	return s.stream(ctx, session, messages, nil, onDelta)
+}
+
+func (s *Service) StreamFocused(ctx context.Context, session domain.Session, messages []domain.Message, focus domain.BriefFocus, onDelta func(string) error) (Result, error) {
+	return s.stream(ctx, session, messages, &focus, onDelta)
+}
+
+func (s *Service) stream(ctx context.Context, session domain.Session, messages []domain.Message, focus *domain.BriefFocus, onDelta func(string) error) (Result, error) {
 	if !s.Configured() {
 		return Result{}, ErrNotConfigured
 	}
@@ -146,7 +154,7 @@ func focusContext(focus *domain.BriefFocus) string {
 	if err != nil {
 		return ""
 	}
-	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe human opened a focused side conversation to iterate this living brief topic. Address their message in relation to this topic, preserve the wider demo context, and avoid broadening the discussion unless a dependency must be surfaced. This is part of the same demo session, not a separate thread.\n</focused_brief_topic>"
+	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe human is iterating this topic in an isolated draft thread. Use the current living brief only as background, address the selected topic directly, and avoid broadening unless a dependency must be surfaced. Do not treat draft statements as confirmed, use the word confirmed for a draft change, claim that the living brief changed, or resume the main conversation. Describe the emerging result as a draft update and help the human converge on concise wording that they can explicitly confirm and apply later.\n</focused_brief_topic>"
 }
 
 func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message, parentGenerationIDs ...string) (BriefResult, error) {
