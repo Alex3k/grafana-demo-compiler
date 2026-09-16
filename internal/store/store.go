@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -79,7 +80,16 @@ CREATE TABLE IF NOT EXISTS operations (
   ended_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS living_briefs (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, version)
+);
+
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
@@ -142,6 +152,13 @@ func (s *Store) GetSession(ctx context.Context, id string) (domain.Session, erro
 		return domain.Session{}, err
 	}
 	session.Messages = messages
+	brief, err := s.GetBrief(ctx, id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return domain.Session{}, err
+	}
+	if err == nil {
+		session.Brief = &brief
+	}
 	return session, nil
 }
 
@@ -155,6 +172,65 @@ func (s *Store) RenameSession(ctx context.Context, id, title string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) UpdateSessionState(ctx context.Context, id, state string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET state = ?, updated_at = ? WHERE id = ?`, state, formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("update session state: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SaveBrief(ctx context.Context, sessionID string, content domain.BriefContent) (domain.LivingBrief, error) {
+	payload, err := json.Marshal(content)
+	if err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("encode living brief: %w", err)
+	}
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("begin living brief update: %w", err)
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM living_briefs WHERE session_id = ?`, sessionID).Scan(&version); err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("find living brief version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO living_briefs(session_id, version, content, updated_at) VALUES (?, ?, ?, ?)`, sessionID, version, string(payload), formatTime(now)); err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("save living brief: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, formatTime(now), sessionID); err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("touch session for living brief: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("commit living brief: %w", err)
+	}
+	return domain.LivingBrief{Version: version, UpdatedAt: now, Content: content}, nil
+}
+
+func (s *Store) GetBrief(ctx context.Context, sessionID string) (domain.LivingBrief, error) {
+	var brief domain.LivingBrief
+	var payload, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT version, content, updated_at FROM living_briefs WHERE session_id = ? ORDER BY version DESC LIMIT 1`, sessionID).Scan(&brief.Version, &payload, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.LivingBrief{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("get living brief: %w", err)
+	}
+	if err := json.Unmarshal([]byte(payload), &brief.Content); err != nil {
+		return domain.LivingBrief{}, fmt.Errorf("decode living brief: %w", err)
+	}
+	brief.UpdatedAt, err = parseTime(updated)
+	if err != nil {
+		return domain.LivingBrief{}, err
+	}
+	return brief, nil
 }
 
 func (s *Store) CreateMessage(ctx context.Context, message domain.Message) (domain.Message, error) {

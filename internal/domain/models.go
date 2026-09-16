@@ -3,12 +3,13 @@ package domain
 import "time"
 
 type Session struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Messages  []Message `json:"messages,omitempty"`
+	ID        string       `json:"id"`
+	Title     string       `json:"title"`
+	State     string       `json:"state"`
+	CreatedAt time.Time    `json:"createdAt"`
+	UpdatedAt time.Time    `json:"updatedAt"`
+	Messages  []Message    `json:"messages,omitempty"`
+	Brief     *LivingBrief `json:"brief,omitempty"`
 }
 
 type Message struct {
@@ -30,4 +31,71 @@ type Operation struct {
 	Error     string     `json:"error,omitempty"`
 	StartedAt time.Time  `json:"startedAt"`
 	EndedAt   *time.Time `json:"endedAt,omitempty"`
+}
+
+type BriefItem struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Status string `json:"status"`
+}
+
+type NarrativeBeat struct {
+	Stage   string `json:"stage"`
+	Detail  string `json:"detail"`
+	Minutes int    `json:"minutes"`
+}
+
+type BriefDecision struct {
+	Summary  string `json:"summary"`
+	Status   string `json:"status"`
+	Evidence string `json:"evidence"`
+}
+
+type PrototypeOffer struct {
+	Ready            bool     `json:"ready"`
+	Summary          string   `json:"summary"`
+	Services         []string `json:"services"`
+	Scenario         string   `json:"scenario"`
+	Telemetry        []string `json:"telemetry"`
+	GrafanaResources []string `json:"grafanaResources"`
+	Assumptions      []string `json:"assumptions"`
+}
+
+type AlignmentEvaluation struct {
+	Result      string   `json:"result"`
+	Explanation string   `json:"explanation"`
+	Missing     []string `json:"missing"`
+	Evidence    []string `json:"evidence"`
+}
+
+type PlanAcceptance struct {
+	Accepted   bool                `json:"accepted"`
+	Evidence   string              `json:"evidence"`
+	Evaluation AlignmentEvaluation `json:"evaluation"`
+}
+
+type BriefContent struct {
+	Changes          []string        `json:"changes"`
+	Audience         BriefItem       `json:"audience"`
+	Company          BriefItem       `json:"company"`
+	Outcome          BriefItem       `json:"outcome"`
+	Stakes           BriefItem       `json:"stakes"`
+	Scenario         BriefItem       `json:"scenario"`
+	Journey          BriefItem       `json:"journey"`
+	ProofPoints      []BriefItem     `json:"proofPoints"`
+	Services         []BriefItem     `json:"services"`
+	Telemetry        []BriefItem     `json:"telemetry"`
+	GrafanaResources []BriefItem     `json:"grafanaResources"`
+	Narrative        []NarrativeBeat `json:"narrative"`
+	Mermaid          string          `json:"mermaid"`
+	OpenQuestions    []string        `json:"openQuestions"`
+	Decisions        []BriefDecision `json:"decisions"`
+	PrototypeOffer   PrototypeOffer  `json:"prototypeOffer"`
+	Acceptance       PlanAcceptance  `json:"acceptance"`
+}
+
+type LivingBrief struct {
+	Version   int          `json:"version"`
+	UpdatedAt time.Time    `json:"updatedAt"`
+	Content   BriefContent `json:"content"`
 }

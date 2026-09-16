@@ -1,8 +1,11 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useId, useRef, useState } from "react";
+import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, streamMessage } from "./api";
-import type { Health, Message, Session, StreamEvent } from "./types";
+import type { BriefItem, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
+
+mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
 const EMPTY_HEALTH: Health = {
   status: "loading",
@@ -88,6 +91,12 @@ function App() {
         const index = messages.findIndex((message) => message.id === failure.messageId);
         if (index >= 0) messages[index] = { ...messages[index], status: "failed", content: messages[index].content || failure.message };
         setError(failure.message);
+      } else if (streamEvent.event === "brief_updated") {
+        const brief = streamEvent.data as LivingBrief;
+        return { ...current, brief, updatedAt: brief.updatedAt, messages };
+      } else if (streamEvent.event === "session_state") {
+        const state = (streamEvent.data as { state: Session["state"] }).state;
+        return { ...current, state, messages };
       }
       return { ...current, messages };
     });
@@ -237,11 +246,12 @@ function ContextRail({ open, session, health, onClose }: { open: boolean; sessio
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
+      <p className="eyebrow rail-section">LIVING BRIEF</p>
+      {session?.brief ? <BriefPanel brief={session.brief} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
       <Connection name="SQLite" status={health.sqlite.status} detail="Persistent session store" />
       <Connection name="Amazon Bedrock" status={health.bedrock.status} detail={health.bedrock.modelId || "Model not configured"} />
       <Connection name="Agent telemetry" status={health.agentObservability.status} detail={health.agentObservability.detail} />
-      <div className="coming-next"><span>STEP 2</span><h3>Living demo brief</h3><p>Audience, outcomes, open questions, and the Mermaid architecture will appear here as the conversation develops.</p></div>
     </aside>
   );
 }
@@ -249,6 +259,79 @@ function ContextRail({ open, session, health, onClose }: { open: boolean; sessio
 function Connection({ name, status, detail }: { name: string; status: string; detail: string }) {
   const healthy = status === "connected" || status === "configured";
   return <div className="connection"><span className={`status-dot ${healthy ? "good" : status === "error" ? "bad" : "warn"}`} /><div><strong>{name}</strong><small>{detail}</small></div></div>;
+}
+
+function BriefPanel({ brief }: { brief: LivingBrief }) {
+  const content = brief.content;
+  const coreItems: Array<[string, BriefItem]> = [
+    ["Audience", content.audience],
+    ["Company", content.company],
+    ["Outcome", content.outcome],
+    ["Stakes", content.stakes],
+    ["Scenario", content.scenario],
+    ["Journey", content.journey],
+  ];
+  return (
+    <div className="brief-panel">
+      <div className="brief-version"><span>Version {brief.version}</span><span>{relativeTime(brief.updatedAt)}</span></div>
+      {!!content.changes.length && <BriefSection title="Changed this turn"><ul>{content.changes.map((change) => <li key={change}>{change}</li>)}</ul></BriefSection>}
+      <div className="brief-core">{coreItems.map(([label, item]) => <BriefItemView key={label} label={label} item={item} />)}</div>
+      <BriefItems title="Proof points" items={content.proofPoints} />
+      <BriefItems title="Services" items={content.services} />
+      <BriefItems title="Telemetry" items={content.telemetry} />
+      <BriefItems title="Grafana resources" items={content.grafanaResources} />
+      {!!content.narrative.length && <BriefSection title={`Narrative · ${content.narrative.reduce((total, beat) => total + beat.minutes, 0)} min`}><ol className="narrative-list">{content.narrative.map((beat) => <li key={`${beat.stage}-${beat.detail}`}><strong>{beat.stage}</strong><span>{beat.detail}</span><small>{beat.minutes}m</small></li>)}</ol></BriefSection>}
+      <BriefSection title="Architecture"><MermaidDiagram source={content.mermaid} /></BriefSection>
+      {!!content.openQuestions.length && <BriefSection title={`Open questions · ${content.openQuestions.length}`} open><ul className="question-list">{content.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></BriefSection>}
+      {!!content.decisions.length && <BriefSection title="Decisions"><ul className="decision-list">{content.decisions.map((decision) => <li key={`${decision.summary}-${decision.evidence}`}><StatusPill status={decision.status} /> <span>{decision.summary}</span></li>)}</ul></BriefSection>}
+      <PrototypeCard offer={content.prototypeOffer} />
+      {content.acceptance.accepted && <AlignmentCard acceptance={content.acceptance} />}
+    </div>
+  );
+}
+
+function BriefItemView({ label, item }: { label: string; item: BriefItem }) {
+  return <div className="brief-item"><div><span>{label}</span><StatusPill status={item.status} /></div><p>{item.value || "Not understood yet"}</p></div>;
+}
+
+function BriefItems({ title, items }: { title: string; items: BriefItem[] }) {
+  if (!items.length) return null;
+  return <BriefSection title={`${title} · ${items.length}`}><ul className="brief-item-list">{items.map((item) => <li key={`${item.name}-${item.value}`}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span></li>)}</ul></BriefSection>;
+}
+
+function BriefSection({ title, open = false, children }: { title: string; open?: boolean; children: React.ReactNode }) {
+  return <details className="brief-section" open={open}><summary>{title}</summary><div className="brief-section-body">{children}</div></details>;
+}
+
+function StatusPill({ status }: { status: string }) {
+  return <span className={`brief-status status-${status}`}>{status}</span>;
+}
+
+function MermaidDiagram({ source }: { source: string }) {
+  const id = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const [svg, setSvg] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!source) { setError(""); return; }
+    let cancelled = false;
+    void mermaid.render(`brief-${id}`, source).then(({ svg: next }) => {
+      if (!cancelled) { setSvg(next); setError(""); }
+    }).catch(() => {
+      if (!cancelled) setError("The latest Mermaid source could not be rendered. The last valid architecture is still shown.");
+    });
+    return () => { cancelled = true; };
+  }, [id, source]);
+  if (!source && !svg) return <p className="brief-muted">Architecture will appear once the service responsibilities are understood.</p>;
+  return <div className="mermaid-wrap">{error && <p className="mermaid-error">{error}</p>}{svg && <div className="mermaid-svg" dangerouslySetInnerHTML={{ __html: svg }} />}</div>;
+}
+
+function PrototypeCard({ offer }: { offer: LivingBrief["content"]["prototypeOffer"] }) {
+  return <div className={`prototype-card ${offer.ready ? "is-ready" : ""}`}><span>{offer.ready ? "PROTOTYPE READY" : "PROTOTYPE NOT READY"}</span><p>{offer.summary || "Keep shaping the audience, outcome, and scenario before building."}</p>{offer.ready && <small>Ask to prototype now, reduce the slice, or continue planning.</small>}</div>;
+}
+
+function AlignmentCard({ acceptance }: { acceptance: LivingBrief["content"]["acceptance"] }) {
+  const evaluation = acceptance.evaluation;
+  return <div className={`alignment-card result-${evaluation.result}`}><span>REQUIREMENT ALIGNMENT</span><strong>{evaluation.result.replaceAll("_", " ")}</strong><p>{evaluation.explanation}</p>{!!evaluation.missing.length && <small>Missing: {evaluation.missing.join("; ")}</small>}</div>;
 }
 
 function EmptyState({ onNew }: { onNew: () => void }) {

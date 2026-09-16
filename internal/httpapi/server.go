@@ -235,6 +235,65 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.store.FinishOperation(r.Context(), operation.ID, "complete", "Assistant response complete", "")
 	writeEvent(w, flusher, "message_completed", assistantMessage)
+	s.updateLivingBrief(r.Context(), w, flusher, session)
+}
+
+func (s *Server) updateLivingBrief(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session) {
+	activity, _ := s.store.CreateMessage(ctx, domain.Message{
+		SessionID: session.ID,
+		Role:      "system",
+		Kind:      "activity",
+		Content:   "Updating the living demo brief",
+		Status:    "complete",
+	})
+	_ = writeEvent(w, flusher, "activity", activity)
+	operation, err := s.store.CreateOperation(ctx, domain.Operation{
+		SessionID: session.ID,
+		Kind:      "living_brief_update",
+		Status:    "running",
+		Summary:   "Extracting decisions, narrative, and architecture",
+	})
+	if err != nil {
+		s.log.Error("could not start living brief update", "session", session.ID, "error", err)
+		return
+	}
+	messages, err := s.store.ListMessages(ctx, session.ID)
+	if err == nil {
+		var content domain.BriefContent
+		content, err = s.chat.BuildBrief(ctx, session, messages)
+		if err == nil {
+			var brief domain.LivingBrief
+			brief, err = s.store.SaveBrief(ctx, session.ID, content)
+			if err == nil {
+				if content.Acceptance.Accepted && content.Acceptance.Evaluation.Result != "does_not_meet" {
+					if stateErr := s.store.UpdateSessionState(ctx, session.ID, "Ready"); stateErr != nil {
+						s.log.Error("could not mark accepted plan ready", "session", session.ID, "error", stateErr)
+					} else {
+						_ = writeEvent(w, flusher, "session_state", map[string]string{"state": "Ready"})
+					}
+				} else if session.State == "Ready" {
+					if stateErr := s.store.UpdateSessionState(ctx, session.ID, "Draft"); stateErr != nil {
+						s.log.Error("could not return revised plan to draft", "session", session.ID, "error", stateErr)
+					} else {
+						_ = writeEvent(w, flusher, "session_state", map[string]string{"state": "Draft"})
+					}
+				}
+				_ = s.store.FinishOperation(ctx, operation.ID, "complete", "Living brief updated", "")
+				_ = writeEvent(w, flusher, "brief_updated", brief)
+				return
+			}
+		}
+	}
+	s.log.Error("living brief update failed", "session", session.ID, "error", err)
+	_ = s.store.FinishOperation(ctx, operation.ID, "failed", "Living brief update failed", err.Error())
+	failure, _ := s.store.CreateMessage(ctx, domain.Message{
+		SessionID: session.ID,
+		Role:      "system",
+		Kind:      "activity",
+		Content:   "The conversation is saved, but the living brief needs another pass",
+		Status:    "complete",
+	})
+	_ = writeEvent(w, flusher, "activity", failure)
 }
 
 func (s *Server) finishStreamWithError(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, operation domain.Operation, message domain.Message, public string, err error) {
