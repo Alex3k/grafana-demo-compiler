@@ -163,7 +163,7 @@ function App() {
             focus={briefFocus}
             messages={(active.messages ?? []).slice(briefFocus.startIndex)}
             busy={sending}
-            onSend={(content) => void send(content, briefFocus)}
+            onSend={(content) => void send(content, { label: briefFocus.label, value: briefFocus.value, status: briefFocus.status })}
             onClose={() => setBriefFocus(null)}
           />
         )}
