@@ -65,7 +65,24 @@ button { color: inherit; }
 .avatar { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid #383741; border-radius: 9px; background: #181820; color: #aaa6b4; font-size: 10px; font-weight: 700; }
 .message-assistant .avatar { color: #ffd1bf; border-color: #513b40; background: linear-gradient(135deg, #35201d, #221b30); }
 .message-label { margin: 1px 0 7px; color: #898592; font-size: 11px; font-weight: 600; }
-.message-content { white-space: pre-wrap; color: #e9e6ed; font-size: 14px; line-height: 1.65; }
+.message-content { min-width: 0; color: #e9e6ed; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.message-user .message-content { white-space: pre-wrap; }
+.message-content > :first-child { margin-top: 0; }
+.message-content > :last-child { margin-bottom: 0; }
+.message-content p { margin: 0 0 12px; }
+.message-content ul, .message-content ol { margin: 8px 0 14px; padding-left: 24px; }
+.message-content li { padding-left: 3px; }
+.message-content li + li { margin-top: 4px; }
+.message-content strong { color: #f7f4fa; font-weight: 700; }
+.message-content a { color: #b89aff; text-underline-offset: 3px; }
+.message-content blockquote { margin: 12px 0; padding: 2px 0 2px 14px; border-left: 3px solid #554468; color: #b9b4c1; }
+.message-content code { border: 1px solid #34313c; border-radius: 5px; padding: 1px 5px; background: #17161c; color: #ffc7b2; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.message-content pre { max-width: 100%; overflow-x: auto; margin: 12px 0; border: 1px solid #302e38; border-radius: 8px; padding: 13px 14px; background: #111116; }
+.message-content pre code { border: 0; padding: 0; background: transparent; color: #e5e1ea; }
+.message-content table { display: block; max-width: 100%; overflow-x: auto; margin: 12px 0; border-collapse: collapse; }
+.message-content th, .message-content td { border: 1px solid #34323c; padding: 6px 9px; text-align: left; }
+.message-content th { background: #18171e; }
+.message-content hr { border: 0; border-top: 1px solid #34323c; margin: 18px 0; }
 .message-status { margin-top: 8px; color: #f2a3a3; font-size: 11px; }
 .activity { display: flex; align-items: center; gap: 8px; margin: -5px 0 23px 46px; color: #837f8c; font-size: 11px; }
 .activity-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--purple); box-shadow: 0 0 9px var(--purple); animation: pulse 1.6s infinite; }

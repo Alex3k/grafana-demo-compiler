@@ -1,4 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api, streamMessage } from "./api";
 import type { Health, Message, Session, StreamEvent } from "./types";
 
@@ -194,7 +196,11 @@ function Conversation({ messages, sending, endRef }: { messages: Message[]; send
           <div className="avatar">{message.role === "user" ? "You" : "G"}</div>
           <div className="message-body">
             <div className="message-label">{message.role === "user" ? "You" : "Demo Compiler"}</div>
-            <div className="message-content">{message.content || (message.status === "streaming" ? <span className="typing">Thinking</span> : "")}</div>
+            <div className="message-content">
+              {message.content ? (
+                message.role === "assistant" ? <Markdown remarkPlugins={[remarkGfm]} skipHtml>{message.content}</Markdown> : message.content
+              ) : message.status === "streaming" ? <span className="typing">Thinking</span> : ""}
+            </div>
             {message.status === "failed" && <div className="message-status">Response interrupted. Your message is saved.</div>}
           </div>
         </article>
