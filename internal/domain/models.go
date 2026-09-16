@@ -51,9 +51,19 @@ type BriefDecision struct {
 	Evidence string `json:"evidence"`
 }
 
+type BriefScope struct {
+	Included           []BriefItem `json:"included"`
+	Excluded           []BriefItem `json:"excluded"`
+	SimulationBoundary BriefItem   `json:"simulationBoundary"`
+}
+
 type PrototypeOffer struct {
 	Ready            bool     `json:"ready"`
 	Summary          string   `json:"summary"`
+	Included         []string `json:"included"`
+	Excluded         []string `json:"excluded"`
+	RealComponents   []string `json:"realComponents"`
+	SimulatedParts   []string `json:"simulatedComponents"`
 	Services         []string `json:"services"`
 	Scenario         string   `json:"scenario"`
 	Telemetry        []string `json:"telemetry"`
@@ -62,10 +72,13 @@ type PrototypeOffer struct {
 }
 
 type AlignmentEvaluation struct {
-	Result      string   `json:"result"`
-	Explanation string   `json:"explanation"`
-	Missing     []string `json:"missing"`
-	Evidence    []string `json:"evidence"`
+	Result           string   `json:"result"`
+	Explanation      string   `json:"explanation"`
+	Missing          []string `json:"missing"`
+	Contradictions   []string `json:"contradictions"`
+	UnnecessaryScope []string `json:"unnecessaryScope"`
+	Risks            []string `json:"risks"`
+	Evidence         []string `json:"evidence"`
 }
 
 type PlanAcceptance struct {
@@ -83,6 +96,7 @@ type BriefContent struct {
 	Scenario         BriefItem       `json:"scenario"`
 	Journey          BriefItem       `json:"journey"`
 	ProofPoints      []BriefItem     `json:"proofPoints"`
+	Scope            BriefScope      `json:"scope"`
 	Services         []BriefItem     `json:"services"`
 	Telemetry        []BriefItem     `json:"telemetry"`
 	GrafanaResources []BriefItem     `json:"grafanaResources"`

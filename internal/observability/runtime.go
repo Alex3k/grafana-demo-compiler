@@ -107,6 +107,20 @@ func (r *Runtime) Status() (string, string) {
 	return "configured", "export credentials and endpoints are configured"
 }
 
+func (r *Runtime) RecordDeploymentGuard(ctx context.Context, sessionID, target string) {
+	if r == nil || r.tracerProvider == nil {
+		return
+	}
+	_, span := r.tracerProvider.Tracer(AgentName).Start(ctx, "deployment.guard")
+	span.SetAttributes(
+		attribute.String("demo.session.id", sessionID),
+		attribute.String("guard.name", "local-application-deployment"),
+		attribute.String("guard.outcome", "blocked"),
+		attribute.String("deployment.target", target),
+	)
+	span.End()
+}
+
 func (r *Runtime) Shutdown(ctx context.Context) error {
 	if r == nil {
 		return nil

@@ -1,6 +1,6 @@
 # Prompt v2 review package
 
-Status: draft for human review. These files are not loaded by the application.
+Status: implemented as the application's versioned Prompt v2 runtime package.
 
 ## Purpose
 

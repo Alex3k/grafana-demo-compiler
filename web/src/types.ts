@@ -46,6 +46,11 @@ export interface LivingBrief {
     scenario: BriefItem;
     journey: BriefItem;
     proofPoints: BriefItem[];
+    scope: {
+      included: BriefItem[];
+      excluded: BriefItem[];
+      simulationBoundary: BriefItem;
+    };
     services: BriefItem[];
     telemetry: BriefItem[];
     grafanaResources: BriefItem[];
@@ -56,6 +61,10 @@ export interface LivingBrief {
     prototypeOffer: {
       ready: boolean;
       summary: string;
+      included: string[];
+      excluded: string[];
+      realComponents: string[];
+      simulatedComponents: string[];
       services: string[];
       scenario: string;
       telemetry: string[];
@@ -69,6 +78,9 @@ export interface LivingBrief {
         result: "" | "meets" | "partially_meets" | "does_not_meet";
         explanation: string;
         missing: string[];
+        contradictions: string[];
+        unnecessaryScope: string[];
+        risks: string[];
         evidence: string[];
       };
     };

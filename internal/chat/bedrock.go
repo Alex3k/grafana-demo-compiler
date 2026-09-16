@@ -16,36 +16,14 @@ import (
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
+	appPrompts "github.com/Alex3k/grafana-demo-compiler/prompts"
 )
 
-const systemPrompt = `You are Grafana Demo Compiler, a collaborative solutions engineer helping a human design a focused, story-led Grafana demo that can be presented in ten minutes or less.
-
-Develop the narrative alongside the system: audience and stakes, normal state, inciting change, investigation in Grafana, diagnosis and action, recovery, and proved outcome. Ask only a small number of targeted questions when an answer would materially change that story. Pair questions with a concrete current proposal so the human has something useful to react to.
-
-Non-negotiable infrastructure contract: application workloads run locally in Docker Compose and contain at least three Go services, MySQL, and Grafana Alloy. Every demo session uses a new Grafana Cloud demo stack created and managed through gcx. Alloy sends the local application's telemetry to that Grafana Cloud stack. Never propose running Grafana OSS, Prometheus, Loki, Tempo, Mimir, or another observability backend in Docker Compose. The separately provided central Agent Observability operations stack monitors this compiler and is not the per-demo stack.
-
-Propose only the telemetry and Grafana resources needed to tell the story. Treat resources explicitly requested by the human as requirements. When enough is known for a coherent vertical slice, offer an early prototype, state its bounded scope and unresolved assumptions, and let the human prototype now, reduce the slice, or keep planning. Do not treat silence as approval. Do not pretend to generate or deploy yet. Application deployment is local Docker Compose only; Grafana Cloud stack creation and resource orchestration happen through gcx. Keep responses concise, specific, and collaborative.`
-
-const briefSystemPrompt = `Maintain the structured living brief for a collaborative Grafana demo design conversation.
-
-Return only the requested JSON object, with concise values and fewer than 4,000 tokens total. Use these rules:
-- Every brief item status is exactly unknown, proposed, or confirmed.
-- A fact explicitly stated by the human is confirmed. An assistant suggestion is proposed until the human explicitly accepts it. Silence is never approval.
-- Preserve confirmed decisions unless the human explicitly corrects them. Record corrections as a new confirmed decision and keep concise evidence.
-- changes lists only the concise material differences from currentBrief; on the first version, list the important facts established so far.
-- Preserve the human's wording for outcomes, proof points, and requested Grafana resources where practical.
-- Requested Grafana resources are confirmed. Assistant recommendations are proposed.
-- Keep telemetry and Grafana resources deliberately small and story-relevant, each with a one-sentence reason in value.
-- Enforce the infrastructure contract in every proposal: application workloads are local Docker Compose with at least three Go services, MySQL, and Alloy; gcx creates and manages a new Grafana Cloud stack for each demo session; Alloy sends telemetry to that stack. Never include Grafana OSS, Prometheus, Loki, Tempo, Mimir, or another observability backend as a local service. The central Agent Observability stack is separate from the per-demo stack.
-- Mermaid contains raw Mermaid source only, begins with flowchart LR, has audience-friendly labels, and describes a small architecture with at least three Go application services and MySQL once enough context exists. Never return a code fence or an ASCII diagram.
-- Narrative uses the stages audience/stakes, normal, change, investigate, act, recover/outcome. Keep the total at ten minutes or less; when it cannot fit, add an open question asking what to cut.
-- A prototype offer is ready only when audience, outcome, scenario, a beginning-to-end journey, three or more Go services, and MySQL are sufficiently understood with no slice-changing ambiguity. Its scope stays bounded and lists unresolved assumptions.
-- acceptance.accepted is true only when the human explicitly accepts the current plan. When true, evaluate whether the plan answers the confirmed audience, outcome, proof points, scenario, and requested resources. evaluation.result is exactly meets, partially_meets, or does_not_meet. Otherwise leave the evaluation strings and lists empty.
-- If a material requirement changes after a prior acceptance, acceptance.accepted becomes false until the human accepts the revised direction.
-- Never introduce ecommerce unless the human requests it. Never assume missing material requirements; keep them unknown and ask through openQuestions.
-
-Use exactly this JSON shape and value types. Every array shown with strings must contain strings, not objects:
-{"changes":["string"],"audience":{"name":"Audience","value":"string","status":"unknown|proposed|confirmed"},"company":{"name":"Company","value":"string","status":"unknown|proposed|confirmed"},"outcome":{"name":"Outcome","value":"string","status":"unknown|proposed|confirmed"},"stakes":{"name":"Stakes","value":"string","status":"unknown|proposed|confirmed"},"scenario":{"name":"Scenario","value":"string","status":"unknown|proposed|confirmed"},"journey":{"name":"Journey","value":"string","status":"unknown|proposed|confirmed"},"proofPoints":[{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],"services":[{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],"telemetry":[{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],"grafanaResources":[{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],"narrative":[{"stage":"string","detail":"string","minutes":1}],"mermaid":"flowchart LR...","openQuestions":["string"],"decisions":[{"summary":"string","status":"unknown|proposed|confirmed","evidence":"string"}],"prototypeOffer":{"ready":false,"summary":"string","services":["string"],"scenario":"string","telemetry":["string"],"grafanaResources":["string"],"assumptions":["string"]},"acceptance":{"accepted":false,"evidence":"string","evaluation":{"result":"","explanation":"","missing":[],"evidence":[]}}}`
+const (
+	roleCollaborator = "demo-collaborator"
+	roleCurator      = "living-brief-curator"
+	roleEvaluator    = "requirement-evaluator"
+)
 
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
 
@@ -56,7 +34,18 @@ type Service struct {
 }
 
 type Result struct {
-	Text string
+	Text         string
+	GenerationID string
+}
+
+type BriefResult struct {
+	Content      domain.BriefContent
+	GenerationID string
+}
+
+type EvaluationResult struct {
+	Evaluation   domain.AlignmentEvaluation
+	GenerationID string
 }
 
 func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
@@ -74,11 +63,24 @@ func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
 			}
 			return o11y.Client
 		},
-		ContextProvider: func(context.Context) agentobservability.ContextInfo {
+		ContextProvider: func(ctx context.Context) agentobservability.ContextInfo {
+			name := observability.AgentName
+			if value, ok := agento11y.AgentNameFromContext(ctx); ok {
+				name = value
+			}
+			version := observability.AgentVersion
+			if value, ok := agento11y.AgentVersionFromContext(ctx); ok {
+				version = value
+			}
+			tags := agento11y.TagsFromContext(ctx)
+			if tags == nil {
+				tags = make(map[string]string)
+			}
+			tags["runtime"] = "local"
 			return agentobservability.ContextInfo{
-				AgentName:    observability.AgentName,
-				AgentVersion: observability.AgentVersion,
-				Tags:         map[string]string{"runtime": "local"},
+				AgentName:    name,
+				AgentVersion: version,
+				Tags:         tags,
 			}
 		},
 		Hooks: agentobservability.HooksOptions{
@@ -105,12 +107,10 @@ func (s *Service) Stream(ctx context.Context, session domain.Session, messages [
 		return Result{}, ErrNotConfigured
 	}
 
-	ctx = agento11y.WithConversationID(ctx, session.ID)
-	ctx = agento11y.WithConversationTitle(ctx, session.Title)
-	ctx = agentobservability.WithGenerationID(ctx, agentobservability.NewGenerationID())
+	ctx, generationID := roleContext(ctx, session, roleCollaborator)
 
 	stream := aisdk.StreamText(ctx, s.model,
-		aisdk.WithSystem(systemPrompt+briefContext(session.Brief)),
+		aisdk.WithSystem(appPrompts.Collaborator()+briefContext(session)),
 		aisdk.WithModelMessages(modelMessages(messages)...),
 		aisdk.WithMaxOutputTokens(1200),
 		aisdk.WithMaxRetries(1),
@@ -135,12 +135,12 @@ func (s *Service) Stream(ctx context.Context, session domain.Session, messages [
 	if err := stream.Err(); err != nil {
 		return Result{}, fmt.Errorf("stream Bedrock response: %w", err)
 	}
-	return Result{Text: text.String()}, nil
+	return Result{Text: sanitizeAssistantText(text.String()), GenerationID: generationID}, nil
 }
 
-func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message) (domain.BriefContent, error) {
+func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message, parentGenerationIDs ...string) (BriefResult, error) {
 	if !s.Configured() {
-		return domain.BriefContent{}, ErrNotConfigured
+		return BriefResult{}, ErrNotConfigured
 	}
 
 	payload, err := json.Marshal(struct {
@@ -148,31 +148,63 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		Messages []domain.Message    `json:"conversation"`
 	}{Current: session.Brief, Messages: conversationalMessages(messages)})
 	if err != nil {
-		return domain.BriefContent{}, fmt.Errorf("encode living brief context: %w", err)
+		return BriefResult{}, fmt.Errorf("encode living brief context: %w", err)
 	}
 
-	ctx = agento11y.WithConversationID(ctx, session.ID)
-	ctx = agento11y.WithConversationTitle(ctx, session.Title)
-	ctx = agentobservability.WithGenerationID(ctx, agentobservability.NewGenerationID())
+	ctx, generationID := roleContext(ctx, session, roleCurator, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
-		aisdk.WithSystem(briefSystemPrompt),
+		aisdk.WithSystem(appPrompts.Curator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
 		aisdk.WithMaxOutputTokens(6000),
 		aisdk.WithMaxRetries(1),
 	)
 	for part := range stream.FullStream() {
 		if streamError, ok := part.(aisdk.StreamError); ok && streamError.Error != nil {
-			return domain.BriefContent{}, fmt.Errorf("generate living brief: %w", streamError.Error)
+			return BriefResult{}, fmt.Errorf("generate living brief: %w", streamError.Error)
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return domain.BriefContent{}, fmt.Errorf("generate living brief: %w", err)
+		return BriefResult{}, fmt.Errorf("generate living brief: %w", err)
 	}
 	var brief domain.BriefContent
 	if err := json.Unmarshal([]byte(stripJSONFence(stream.Text())), &brief); err != nil {
-		return domain.BriefContent{}, fmt.Errorf("decode living brief: %w", err)
+		return BriefResult{}, fmt.Errorf("decode living brief: %w", err)
 	}
-	return normalizeBrief(brief), nil
+	return BriefResult{Content: normalizeBrief(brief), GenerationID: generationID}, nil
+}
+
+func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brief domain.BriefContent, messages []domain.Message, parentGenerationIDs ...string) (EvaluationResult, error) {
+	if !s.Configured() {
+		return EvaluationResult{}, ErrNotConfigured
+	}
+	payload, err := json.Marshal(struct {
+		Brief         domain.BriefContent `json:"brief"`
+		CandidatePlan string              `json:"candidatePlan"`
+	}{Brief: brief, CandidatePlan: acceptedAssistantPlan(messages)})
+	if err != nil {
+		return EvaluationResult{}, fmt.Errorf("encode requirement evaluation context: %w", err)
+	}
+
+	ctx, generationID := roleContext(ctx, session, roleEvaluator, parentGenerationIDs...)
+	stream := aisdk.StreamText(ctx, s.model,
+		aisdk.WithSystem(appPrompts.Evaluator()),
+		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithMaxOutputTokens(3000),
+		aisdk.WithMaxRetries(1),
+	)
+	for part := range stream.FullStream() {
+		if streamError, ok := part.(aisdk.StreamError); ok && streamError.Error != nil {
+			return EvaluationResult{}, fmt.Errorf("evaluate demo requirement: %w", streamError.Error)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return EvaluationResult{}, fmt.Errorf("evaluate demo requirement: %w", err)
+	}
+	var evaluation domain.AlignmentEvaluation
+	if err := json.Unmarshal([]byte(stripJSONFence(stream.Text())), &evaluation); err != nil {
+		return EvaluationResult{}, fmt.Errorf("decode requirement evaluation: %w", err)
+	}
+	return EvaluationResult{Evaluation: normalizeEvaluation(evaluation), GenerationID: generationID}, nil
 }
 
 func stripJSONFence(value string) string {
@@ -184,15 +216,34 @@ func stripJSONFence(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func briefContext(brief *domain.LivingBrief) string {
-	if brief == nil {
-		return ""
+func sanitizeAssistantText(value string) string {
+	for _, marker := range []string{"<turn_complete>", "</turn_complete>"} {
+		value = strings.ReplaceAll(value, marker, "")
 	}
-	payload, err := json.Marshal(brief.Content)
+	return strings.TrimSpace(value)
+}
+
+func briefContext(session domain.Session) string {
+	payload, err := json.Marshal(struct {
+		State string              `json:"sessionState"`
+		Brief *domain.LivingBrief `json:"currentBrief,omitempty"`
+	}{State: session.State, Brief: session.Brief})
 	if err != nil {
 		return ""
 	}
-	return "\n\nCurrent living brief (use it to avoid repeated questions; proposed is not confirmed):\n" + string(payload)
+	return "\n\n<session_context>\n" + string(payload) + "\n</session_context>"
+}
+
+func roleContext(ctx context.Context, session domain.Session, role string, parentGenerationIDs ...string) (context.Context, string) {
+	generationID := agentobservability.NewGenerationID()
+	ctx = agento11y.WithConversationID(ctx, session.ID)
+	ctx = agento11y.WithConversationTitle(ctx, session.Title)
+	ctx = agento11y.WithAgentName(ctx, observability.AgentName+"/"+role)
+	ctx = agento11y.WithAgentVersion(ctx, observability.AgentVersion)
+	ctx = agento11y.WithTags(ctx, map[string]string{"agent.role": role, "prompt.version": appPrompts.Version})
+	ctx = agentobservability.WithGenerationID(ctx, generationID)
+	ctx = agentobservability.WithParentGenerationIDs(ctx, parentGenerationIDs...)
+	return ctx, generationID
 }
 
 func conversationalMessages(messages []domain.Message) []domain.Message {
@@ -222,7 +273,8 @@ func normalizeBrief(brief domain.BriefContent) domain.BriefContent {
 	brief.Stakes = normalizeItem(brief.Stakes)
 	brief.Scenario = normalizeItem(brief.Scenario)
 	brief.Journey = normalizeItem(brief.Journey)
-	for _, items := range [][]domain.BriefItem{brief.ProofPoints, brief.Services, brief.Telemetry, brief.GrafanaResources} {
+	brief.Scope.SimulationBoundary = normalizeItem(brief.Scope.SimulationBoundary)
+	for _, items := range [][]domain.BriefItem{brief.ProofPoints, brief.Scope.Included, brief.Scope.Excluded, brief.Services, brief.Telemetry, brief.GrafanaResources} {
 		for index := range items {
 			items[index] = normalizeItem(items[index])
 		}
@@ -231,16 +283,38 @@ func normalizeBrief(brief domain.BriefContent) domain.BriefContent {
 	if brief.Mermaid != "" && !strings.HasPrefix(brief.Mermaid, "flowchart") && !strings.HasPrefix(brief.Mermaid, "graph") {
 		brief.Mermaid = ""
 	}
-	if brief.Acceptance.Accepted {
-		switch brief.Acceptance.Evaluation.Result {
-		case "meets", "partially_meets", "does_not_meet":
-		default:
-			brief.Acceptance.Evaluation.Result = "does_not_meet"
-		}
-	} else {
+	if !brief.Acceptance.Accepted {
 		brief.Acceptance.Evaluation = domain.AlignmentEvaluation{}
 	}
 	return brief
+}
+
+func normalizeEvaluation(evaluation domain.AlignmentEvaluation) domain.AlignmentEvaluation {
+	switch evaluation.Result {
+	case "meets", "partially_meets", "does_not_meet":
+	default:
+		evaluation.Result = "does_not_meet"
+	}
+	evaluation.Explanation = strings.TrimSpace(evaluation.Explanation)
+	return evaluation
+}
+
+func acceptedAssistantPlan(messages []domain.Message) string {
+	latestUserIndex := -1
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.Kind == "message" && message.Role == "user" && message.Status == "complete" {
+			latestUserIndex = index
+			break
+		}
+	}
+	for index := latestUserIndex - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.Kind == "message" && message.Role == "assistant" && message.Status == "complete" {
+			return message.Content
+		}
+	}
+	return ""
 }
 
 func modelMessages(messages []domain.Message) []provider.Message {

@@ -290,6 +290,9 @@ function BriefPanel({ brief }: { brief: LivingBrief }) {
       {!!content.changes.length && <BriefSection title="Changed this turn"><ul>{content.changes.map((change) => <li key={change}>{change}</li>)}</ul></BriefSection>}
       <div className="brief-core">{coreItems.map(([label, item]) => <BriefItemView key={label} label={label} item={item} />)}</div>
       <BriefItems title="Proof points" items={content.proofPoints} />
+      <BriefItems title="Included scope" items={content.scope?.included} />
+      <BriefItems title="Deliberately excluded" items={content.scope?.excluded} />
+      {content.scope?.simulationBoundary?.value && <BriefItemView label="Simulation boundary" item={content.scope.simulationBoundary} />}
       <BriefItems title="Services" items={content.services} />
       <BriefItems title="Telemetry" items={content.telemetry} />
       <BriefItems title="Grafana resources" items={content.grafanaResources} />
@@ -307,9 +310,10 @@ function BriefItemView({ label, item }: { label: string; item: BriefItem }) {
   return <div className="brief-item"><div><span>{label}</span><StatusPill status={item.status} /></div><p>{item.value || "Not understood yet"}</p></div>;
 }
 
-function BriefItems({ title, items }: { title: string; items: BriefItem[] }) {
-  if (!items.length) return null;
-  return <BriefSection title={`${title} · ${items.length}`}><ul className="brief-item-list">{items.map((item) => <li key={`${item.name}-${item.value}`}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span></li>)}</ul></BriefSection>;
+function BriefItems({ title, items }: { title: string; items?: BriefItem[] | null }) {
+  const visibleItems = items ?? [];
+  if (!visibleItems.length) return null;
+  return <BriefSection title={`${title} · ${visibleItems.length}`}><ul className="brief-item-list">{visibleItems.map((item) => <li key={`${item.name}-${item.value}`}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span></li>)}</ul></BriefSection>;
 }
 
 function BriefSection({ title, open = false, children }: { title: string; open?: boolean; children: React.ReactNode }) {
@@ -344,7 +348,11 @@ function PrototypeCard({ offer }: { offer: LivingBrief["content"]["prototypeOffe
 
 function AlignmentCard({ acceptance }: { acceptance: LivingBrief["content"]["acceptance"] }) {
   const evaluation = acceptance.evaluation;
-  return <div className={`alignment-card result-${evaluation.result}`}><span>REQUIREMENT ALIGNMENT</span><strong>{evaluation.result.replaceAll("_", " ")}</strong><p>{evaluation.explanation}</p>{!!evaluation.missing.length && <small>Missing: {evaluation.missing.join("; ")}</small>}</div>;
+  const missing = evaluation.missing ?? [];
+  const contradictions = evaluation.contradictions ?? [];
+  const unnecessaryScope = evaluation.unnecessaryScope ?? [];
+  const risks = evaluation.risks ?? [];
+  return <div className={`alignment-card result-${evaluation.result}`}><span>REQUIREMENT ALIGNMENT</span><strong>{evaluation.result.replaceAll("_", " ")}</strong><p>{evaluation.explanation}</p>{!!missing.length && <small>Missing: {missing.join("; ")}</small>}{!!contradictions.length && <small>Contradictions: {contradictions.join("; ")}</small>}{!!unnecessaryScope.length && <small>Unnecessary scope: {unnecessaryScope.join("; ")}</small>}{!!risks.length && <small>Risks: {risks.join("; ")}</small>}</div>;
 }
 
 function EmptyState({ onNew }: { onNew: () => void }) {
