@@ -14,8 +14,8 @@ one human-facing voice:
    against confirmed requirements.
 
 `shared-constitution.md` is prepended to each LLM role. The local deployment
-boundary is enforced by deterministic application code described in
-`local-deployment-guard.md`, not by another LLM.
+boundary remains part of the MVP prompt context. Its planned deterministic
+application guard is deferred and described in `local-deployment-guard.md`.
 
 ## Intended execution order
 
@@ -35,8 +35,7 @@ When the human explicitly accepts the current plan:
 3. Persist and display the evaluation without allowing it to rewrite the
    brief or candidate.
 
-Before any runtime or deployment tool call, execute the deterministic local
-deployment guard.
+Deterministic enforcement before runtime or deployment tool calls is deferred.
 
 ## Context handling
 

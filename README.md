@@ -4,7 +4,8 @@ Grafana Demo Compiler is a collaborative, local-first assistant for designing,
 building, running, and validating short, story-led Grafana demos.
 
 The MVP generates Go application services backed by MySQL and runs them locally
-with Docker Compose. Remote deployment targets are unsupported and blocked.
+with Docker Compose. Remote deployment targets remain unsupported; deterministic
+enforcement is deferred.
 Grafana Alloy sends demo telemetry to a dedicated Grafana Cloud stack that
 `gcx` creates and manages for each demo session.
 

@@ -14,7 +14,6 @@ import (
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
-	deploymentguard "github.com/Alex3k/grafana-demo-compiler/internal/guard"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
 )
@@ -177,11 +176,6 @@ func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
 			session.Title = title
 		}
 	}
-	if decision := deploymentguard.CheckDeploymentRequest(input.Content); decision.Blocked {
-		s.handleBlockedDeployment(r.Context(), w, flusher, session, userMessage, decision)
-		return
-	}
-
 	activity, _ := s.store.CreateMessage(r.Context(), domain.Message{
 		SessionID: session.ID,
 		Role:      "system",
@@ -333,16 +327,6 @@ func (s *Server) createBriefThreadMessage(w http.ResponseWriter, r *http.Request
 	_ = writeEvent(w, flusher, "message_started", assistantMessage)
 	_ = writeEvent(w, flusher, "candidate_updated", map[string]string{"value": ""})
 
-	if decision := deploymentguard.CheckDeploymentRequest(input.Content); decision.Blocked {
-		content := fmt.Sprintf("Application deployment to %s is blocked by the MVP's local-only guard. This topic can only describe a local Docker Compose application; the per-session Grafana Cloud stack remains managed through `gcx`.", decision.Target)
-		assistantMessage.Content = content
-		assistantMessage.Status = "complete"
-		_ = s.store.UpdateBriefThreadMessage(r.Context(), assistantMessage.ID, content, "complete")
-		_ = writeEvent(w, flusher, "message_completed", assistantMessage)
-		_ = writeEvent(w, flusher, "turn_completed", map[string]string{"threadId": thread.ID})
-		return
-	}
-
 	messages, err := s.store.ListBriefThreadMessages(r.Context(), thread.ID)
 	if err != nil {
 		s.finishBriefThreadStreamWithError(r.Context(), w, flusher, assistantMessage, "Could not reload focused conversation", err)
@@ -416,49 +400,6 @@ func (s *Server) confirmBriefThread(w http.ResponseWriter, r *http.Request) {
 	thread.State = "confirmed"
 	activity, _ := s.store.CreateMessage(r.Context(), domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Confirmed brief topic: " + thread.Focus.Label, Status: "complete"})
 	writeJSON(w, http.StatusOK, map[string]any{"thread": thread, "brief": brief, "activity": activity})
-}
-
-func (s *Server) handleBlockedDeployment(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session, userMessage domain.Message, decision deploymentguard.Decision) {
-	activity, _ := s.store.CreateMessage(ctx, domain.Message{
-		SessionID: session.ID,
-		Role:      "system",
-		Kind:      "activity",
-		Content:   "Local-only deployment guard blocked the remote application target",
-		Status:    "complete",
-	})
-	operation, err := s.store.CreateOperation(ctx, domain.Operation{
-		SessionID: session.ID,
-		Kind:      "deployment_guard",
-		Status:    "running",
-		Summary:   "Checking the requested application deployment target",
-	})
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Could not record deployment guard outcome", err)
-		return
-	}
-	content := fmt.Sprintf("Application deployment to %s is blocked by the MVP's local-only guard. I can build and run the application locally with Docker Compose and model the requested architecture or failure mode there. The required per-session Grafana Cloud stack and Grafana resources will still be created and managed through `gcx`.", decision.Target)
-	assistantMessage, err := s.store.CreateMessage(ctx, domain.Message{
-		SessionID: session.ID,
-		Role:      "assistant",
-		Kind:      "message",
-		Content:   content,
-		Status:    "complete",
-	})
-	if err != nil {
-		_ = s.store.FinishOperation(ctx, operation.ID, "failed", "Could not save guard response", err.Error())
-		s.writeError(w, http.StatusInternalServerError, "Could not save guard response", err)
-		return
-	}
-	_ = s.store.FinishOperation(ctx, operation.ID, "complete", "Remote application deployment blocked", "")
-	s.o11y.RecordDeploymentGuard(ctx, session.ID, decision.Target)
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	_ = writeEvent(w, flusher, "user_message", userMessage)
-	_ = writeEvent(w, flusher, "activity", activity)
-	_ = writeEvent(w, flusher, "message_completed", assistantMessage)
-	s.updateLivingBrief(ctx, w, flusher, session)
 }
 
 func (s *Server) updateLivingBrief(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, session domain.Session, parentGenerationIDs ...string) {

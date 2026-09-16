@@ -1,6 +1,7 @@
 # Local deployment guard contract
 
-This is a deterministic application guard, not an LLM prompt.
+Status: deferred. This documents the planned deterministic application guard;
+it is not currently implemented or executed.
 
 ## Purpose
 
@@ -42,6 +43,6 @@ When blocked, record the guard outcome and tell the human:
    feasible;
 4. that required Grafana Cloud operations through `gcx` remain supported.
 
-The guard must run when interpreting a deployment request and again immediately
-before a runtime or deployment tool executes. Prompt compliance is not a
-substitute for this check.
+When implemented, the guard must run when interpreting a deployment request and
+again immediately before a runtime or deployment tool executes. Prompt
+compliance is not a substitute for this future check.
