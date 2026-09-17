@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/brieftopics"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	_ "modernc.org/sqlite"
 )
@@ -160,6 +161,9 @@ CREATE INDEX IF NOT EXISTS deployments_session_created_idx
   ON deployments(session_id, created_at DESC);
 
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
+CREATE TABLE IF NOT EXISTS session_deletions (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE
+);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
@@ -231,6 +235,9 @@ SET source_message_id = COALESCE((
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)`); err != nil {
 		return fmt.Errorf("record living brief cursor migration: %w", err)
 	}
+	if err := s.migrateBriefTopicIDs(ctx); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE brief_thread_messages SET status = 'interrupted' WHERE status = 'streaming';
@@ -243,6 +250,117 @@ UPDATE sessions SET state = 'Generated' WHERE state IN ('Draft', 'Ready') AND EX
 `, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), formatTime(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("recover interrupted work: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateBriefTopicIDs(ctx context.Context) error {
+	var alreadyApplied int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = 10`).Scan(&alreadyApplied); err != nil {
+		return fmt.Errorf("inspect brief topic ID migration: %w", err)
+	}
+	if alreadyApplied > 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin brief topic ID migration: %w", err)
+	}
+	defer tx.Rollback()
+	var columnCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('brief_threads') WHERE name = 'topic_id'`).Scan(&columnCount); err != nil {
+		return fmt.Errorf("inspect brief topic ID schema: %w", err)
+	}
+	if columnCount == 0 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE brief_threads ADD COLUMN topic_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add brief topic ID: %w", err)
+		}
+	}
+
+	type storedBrief struct {
+		sessionID string
+		version   int
+		content   domain.BriefContent
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT session_id, version, content FROM living_briefs ORDER BY session_id, version`)
+	if err != nil {
+		return fmt.Errorf("list briefs for topic ID migration: %w", err)
+	}
+	var briefs []storedBrief
+	for rows.Next() {
+		var item storedBrief
+		var payload string
+		if err := rows.Scan(&item.sessionID, &item.version, &payload); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan brief for topic ID migration: %w", err)
+		}
+		if err := json.Unmarshal([]byte(payload), &item.content); err != nil {
+			rows.Close()
+			return fmt.Errorf("decode brief for topic ID migration: %w", err)
+		}
+		briefs = append(briefs, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	previous := map[string]*domain.BriefContent{}
+	bySession := map[string][]domain.BriefContent{}
+	for index := range briefs {
+		brieftopics.Reconcile(previous[briefs[index].sessionID], &briefs[index].content)
+		payload, err := json.Marshal(briefs[index].content)
+		if err != nil {
+			return fmt.Errorf("encode brief topic IDs: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE living_briefs SET content = ? WHERE session_id = ? AND version = ?`, string(payload), briefs[index].sessionID, briefs[index].version); err != nil {
+			return fmt.Errorf("store brief topic IDs: %w", err)
+		}
+		copy := briefs[index].content
+		previous[briefs[index].sessionID] = &copy
+		bySession[briefs[index].sessionID] = append(bySession[briefs[index].sessionID], copy)
+	}
+
+	type storedThread struct{ id, sessionID, label, topicID string }
+	rows, err = tx.QueryContext(ctx, `SELECT id, session_id, label, topic_id FROM brief_threads`)
+	if err != nil {
+		return fmt.Errorf("list threads for topic ID migration: %w", err)
+	}
+	var threads []storedThread
+	for rows.Next() {
+		var thread storedThread
+		if err := rows.Scan(&thread.id, &thread.sessionID, &thread.label, &thread.topicID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan thread for topic ID migration: %w", err)
+		}
+		threads = append(threads, thread)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, thread := range threads {
+		if thread.topicID != "" {
+			continue
+		}
+		for index := len(bySession[thread.sessionID]) - 1; index >= 0; index-- {
+			if focus, ok := brieftopics.ResolveLegacyLabel(&bySession[thread.sessionID][index], thread.label); ok {
+				thread.topicID = focus.TopicID
+				break
+			}
+		}
+		if thread.topicID == "" {
+			thread.topicID = "legacy_" + thread.id
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE brief_threads SET topic_id = ? WHERE id = ?`, thread.topicID, thread.id); err != nil {
+			return fmt.Errorf("store brief thread topic ID: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS brief_threads_session_topic_idx ON brief_threads(session_id, topic_id, updated_at)`); err != nil {
+		return fmt.Errorf("index brief thread topic IDs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)`); err != nil {
+		return fmt.Errorf("record brief topic ID migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit brief topic ID migration: %w", err)
 	}
 	return nil
 }
@@ -313,6 +431,34 @@ func (s *Store) GetSession(ctx context.Context, id string) (domain.Session, erro
 	}
 	session.Deployments = deployments
 	return session, nil
+}
+
+func (s *Store) SessionDeleting(ctx context.Context, id string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_deletions WHERE session_id = ?`, id).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) BeginSessionDeletion(ctx context.Context, id string) error {
+	var busy int
+	err := s.db.QueryRowContext(ctx, `SELECT
+ (SELECT COUNT(*) FROM operations WHERE session_id = ? AND status = 'running') +
+ (SELECT COUNT(*) FROM brief_thread_messages WHERE session_id = ? AND status = 'streaming') +
+ (SELECT COUNT(*) FROM prototype_iterations WHERE session_id = ? AND status = 'generating') +
+ (SELECT COUNT(*) FROM deployments WHERE session_id = ? AND status IN ('provisioning','starting','verifying'))`, id, id, id, id).Scan(&busy)
+	if err != nil {
+		return err
+	}
+	if busy > 0 {
+		return errors.New("wait for this session's active operations to finish before deleting")
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO session_deletions(session_id) VALUES (?)`, id)
+	return err
+}
+
+func (s *Store) DeleteSession(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
+	return err
 }
 
 func (s *Store) CreateDeployment(ctx context.Context, deployment domain.Deployment) (domain.Deployment, error) {
@@ -617,6 +763,7 @@ func (s *Store) SaveBrief(ctx context.Context, sessionID string, content domain.
 }
 
 func (s *Store) SaveBriefWithCursor(ctx context.Context, sessionID, sourceMessageID string, content domain.BriefContent) (domain.LivingBrief, error) {
+	brieftopics.Ensure(&content)
 	payload, err := json.Marshal(content)
 	if err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("encode living brief: %w", err)
@@ -739,11 +886,11 @@ FROM messages WHERE session_id = ?`
 
 func (s *Store) OpenBriefThread(ctx context.Context, sessionID string, focus domain.BriefFocus) (domain.BriefThread, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, session_id, label, value, status, candidate_value, state, created_at, updated_at
+SELECT id, session_id, topic_id, label, value, status, candidate_value, state, created_at, updated_at
 FROM brief_threads
-WHERE session_id = ? AND label = ? AND state = 'draft'
+WHERE session_id = ? AND topic_id = ? AND state = 'draft'
 ORDER BY updated_at DESC LIMIT 1
-`, sessionID, focus.Label)
+`, sessionID, focus.TopicID)
 	thread, err := scanBriefThread(row)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return domain.BriefThread{}, err
@@ -752,9 +899,9 @@ ORDER BY updated_at DESC LIMIT 1
 		now := time.Now().UTC()
 		thread = domain.BriefThread{ID: newID(), SessionID: sessionID, Focus: focus, State: "draft", CreatedAt: now, UpdatedAt: now}
 		_, err = s.db.ExecContext(ctx, `
-INSERT INTO brief_threads(id, session_id, label, value, status, candidate_value, state, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, thread.ID, thread.SessionID, thread.Focus.Label, thread.Focus.Value, thread.Focus.Status, thread.CandidateValue, thread.State, formatTime(now), formatTime(now))
+INSERT INTO brief_threads(id, session_id, topic_id, label, value, status, candidate_value, state, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, thread.ID, thread.SessionID, thread.Focus.TopicID, thread.Focus.Label, thread.Focus.Value, thread.Focus.Status, thread.CandidateValue, thread.State, formatTime(now), formatTime(now))
 		if err != nil {
 			return domain.BriefThread{}, fmt.Errorf("create brief thread: %w", err)
 		}
@@ -768,7 +915,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 
 func (s *Store) GetBriefThread(ctx context.Context, sessionID, threadID string) (domain.BriefThread, error) {
 	thread, err := scanBriefThread(s.db.QueryRowContext(ctx, `
-SELECT id, session_id, label, value, status, candidate_value, state, created_at, updated_at
+SELECT id, session_id, topic_id, label, value, status, candidate_value, state, created_at, updated_at
 FROM brief_threads WHERE id = ? AND session_id = ?
 `, threadID, sessionID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -852,6 +999,7 @@ FROM brief_thread_messages WHERE thread_id = ? ORDER BY created_at, id
 }
 
 func (s *Store) ApplyBriefThread(ctx context.Context, sessionID, threadID string, content domain.BriefContent) (domain.LivingBrief, error) {
+	brieftopics.Ensure(&content)
 	payload, err := json.Marshal(content)
 	if err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("encode confirmed brief: %w", err)
@@ -975,7 +1123,7 @@ func scanDeployment(row scanner) (domain.Deployment, error) {
 func scanBriefThread(row scanner) (domain.BriefThread, error) {
 	var thread domain.BriefThread
 	var created, updated string
-	if err := row.Scan(&thread.ID, &thread.SessionID, &thread.Focus.Label, &thread.Focus.Value, &thread.Focus.Status, &thread.CandidateValue, &thread.State, &created, &updated); err != nil {
+	if err := row.Scan(&thread.ID, &thread.SessionID, &thread.Focus.TopicID, &thread.Focus.Label, &thread.Focus.Value, &thread.Focus.Status, &thread.CandidateValue, &thread.State, &created, &updated); err != nil {
 		return domain.BriefThread{}, err
 	}
 	var err error

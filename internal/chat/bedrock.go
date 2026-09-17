@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/grafana/agento11y/go/agento11y"
 	aisdk "github.com/grafana/ai-sdk"
@@ -14,15 +16,18 @@ import (
 	"github.com/grafana/ai-sdk/provider"
 	"github.com/grafana/ai-sdk/providers/bedrock"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/brieftopics"
 	"github.com/Alex3k/grafana-demo-compiler/internal/contextengine"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 	"github.com/Alex3k/grafana-demo-compiler/internal/prototype"
+	"github.com/Alex3k/grafana-demo-compiler/internal/store"
 	appPrompts "github.com/Alex3k/grafana-demo-compiler/prompts"
 )
 
 const (
 	roleCollaborator        = "demo-collaborator"
+	roleFocused             = "focused-topic"
 	roleCurator             = "living-brief-curator"
 	roleEvaluator           = "requirement-evaluator"
 	rolePrototypePlanner    = "prototype-planner"
@@ -36,9 +41,13 @@ const (
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
 
 type Service struct {
-	model   provider.LanguageModel
-	modelID string
-	region  string
+	gcxStore      *store.Store
+	model         provider.LanguageModel
+	modelID       string
+	region        string
+	contextConfig contextengine.Config
+	usageMu       sync.RWMutex
+	usage         map[string]map[contextengine.Role]ContextUsage
 }
 
 type Result struct {
@@ -47,9 +56,10 @@ type Result struct {
 }
 
 type BriefResult struct {
-	Content      domain.BriefContent
-	GenerationID string
-	Unchanged    bool
+	Content           domain.BriefContent
+	GenerationID      string
+	ConsumedMessageID string
+	Unchanged         bool
 }
 
 type EvaluationResult struct {
@@ -193,8 +203,9 @@ func (proposal briefUpdateProposal) content() domain.BriefContent {
 func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
 	region := strings.TrimSpace(os.Getenv("AWS_REGION"))
 	modelID := strings.TrimSpace(os.Getenv("BEDROCK_MODEL_ID"))
+	contextConfig := contextConfigFromEnv()
 	if region == "" || modelID == "" {
-		return &Service{modelID: modelID, region: region}, nil
+		return &Service{modelID: modelID, region: region, contextConfig: contextConfig}, nil
 	}
 
 	base := bedrock.New(modelID, bedrock.WithRegion(region))
@@ -211,7 +222,7 @@ func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
 		},
 	})
 
-	return &Service{model: wrapped, modelID: modelID, region: region}, nil
+	return &Service{model: wrapped, modelID: modelID, region: region, contextConfig: contextConfig}, nil
 }
 
 func contextInfo(ctx context.Context) agentobservability.ContextInfo {
@@ -237,10 +248,75 @@ func contextInfo(ctx context.Context) agentobservability.ContextInfo {
 		metadata["context.topic_keys"] = manifest.IncludedTopicKeys
 		metadata["context.includes_operational_state"] = manifest.IncludesOperationalState
 		metadata["context.approximate_characters"] = manifest.ApproximateCharacters
+		metadata["context.estimated_tokens"] = manifest.EstimatedTokens
+		metadata["context.max_input_tokens"] = manifest.MaxInputTokens
+		metadata["context.fixed_tokens"] = manifest.FixedTokens
+		metadata["context.safety_margin_tokens"] = manifest.SafetyMarginTokens
+		metadata["context.provider_overhead_tokens"] = manifest.ProviderOverheadTokens
+		metadata["context.estimator"] = manifest.Estimator
+		metadata["context.included_sections"] = sectionNames(manifest.IncludedSections)
+		metadata["context.dropped_sections"] = sectionNames(manifest.DroppedSections)
+		metadata["context.truncated"] = manifest.Truncated
 	}
 	return agentobservability.ContextInfo{
 		AgentName: name, AgentVersion: version, Tags: tags, Metadata: metadata,
 	}
+}
+
+func sectionNames(sections []contextengine.SectionDecision) []string {
+	names := make([]string, 0, len(sections))
+	for _, section := range sections {
+		names = append(names, section.Name)
+	}
+	return names
+}
+
+func contextConfigFromEnv() contextengine.Config {
+	config := contextengine.DefaultConfig()
+	config.MaxInputTokens = positiveEnvInt("DEMO_COMPILER_CONTEXT_MAX_INPUT_TOKENS", config.MaxInputTokens)
+	config.SafetyMarginTokens = positiveEnvInt("DEMO_COMPILER_CONTEXT_SAFETY_TOKENS", config.SafetyMarginTokens)
+	config.ProviderOverheadTokens = positiveEnvInt("DEMO_COMPILER_CONTEXT_PROVIDER_OVERHEAD_TOKENS", config.ProviderOverheadTokens)
+	config.BytesPerToken = positiveEnvInt("DEMO_COMPILER_CONTEXT_BYTES_PER_TOKEN", config.BytesPerToken)
+	return config
+}
+
+func positiveEnvInt(name string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func estimateTokens(value []byte, bytesPerToken int) int {
+	if len(value) == 0 {
+		return 0
+	}
+	return (len(value) + bytesPerToken - 1) / bytesPerToken
+}
+
+func (s *Service) configForPrompt(systemPrompt string, toolReserve int) contextengine.Config {
+	config := s.contextConfig
+	defaults := contextengine.DefaultConfig()
+	if config.MaxInputTokens <= 0 {
+		config.MaxInputTokens = defaults.MaxInputTokens
+	}
+	if config.SafetyMarginTokens <= 0 {
+		config.SafetyMarginTokens = defaults.SafetyMarginTokens
+	}
+	if config.ProviderOverheadTokens <= 0 {
+		config.ProviderOverheadTokens = defaults.ProviderOverheadTokens
+	}
+	if config.BytesPerToken <= 0 {
+		config.BytesPerToken = defaults.BytesPerToken
+	}
+	config.FixedTokens = estimateTokens([]byte(systemPrompt), config.BytesPerToken) + 256
+	config.ProviderOverheadTokens += toolReserve
+	return config
+}
+
+func (s *Service) compilerFor(systemPrompt string, toolReserve int) contextengine.Compiler {
+	return contextengine.NewWithConfig(s.configForPrompt(systemPrompt, toolReserve))
 }
 
 func (s *Service) Configured() bool {
@@ -267,13 +343,28 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 		return Result{}, ErrNotConfigured
 	}
 
-	compiler := contextengine.New(6)
+	tools, toolContext, err := s.inspectionTools(ctx, session, onDelta)
+	if err != nil {
+		return Result{}, err
+	}
+	if focus == nil && s.gcxStore != nil {
+		revisionContext, err := s.revisionTools(ctx, session, tools)
+		if err != nil {
+			return Result{}, err
+		}
+		toolContext += revisionContext
+	}
+	compiler := s.compilerFor(appPrompts.Collaborator()+toolContext, 4000)
 	var systemContext string
 	var selectedMessages []domain.Message
 	var manifest contextengine.Manifest
 	if focus == nil {
 		session.Messages = messages
-		packet := compiler.Collaborator(session)
+		packet, err := compiler.Collaborator(session)
+		if err != nil {
+			s.recordContextOverflow(session.ID, err)
+			return Result{}, err
+		}
 		manifest = packet.Manifest
 		selectedMessages = append(selectedMessages, packet.RecentMessages...)
 		if packet.CurrentUserMessage != nil {
@@ -281,15 +372,26 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 		}
 		systemContext = collaboratorContext(packet)
 	} else {
-		packet := compiler.Focused(session, *focus, messages)
+		packet, err := compiler.Focused(session, *focus, messages)
+		if err != nil {
+			s.recordContextOverflow(session.ID, err)
+			return Result{}, err
+		}
 		manifest = packet.Manifest
 		selectedMessages = packet.FocusedMessages
 		systemContext = focusedContext(packet)
 	}
-	ctx, generationID := roleContext(ctx, session, roleCollaborator, manifest)
+	role := roleCollaborator
+	if focus != nil {
+		role = roleFocused
+	}
+	ctx, generationID := s.roleContext(ctx, session, role, manifest)
 
 	stream := aisdk.StreamText(ctx, s.model,
-		aisdk.WithSystem(appPrompts.Collaborator()+systemContext),
+		aisdk.WithSystem(appPrompts.Collaborator()+systemContext+toolContext),
+		aisdk.WithPrepareStep(s.reportStepUsage(session.ID, manifest)),
+		aisdk.WithTools(tools),
+		aisdk.WithStopWhen(aisdk.StepCountIs(10)),
 		aisdk.WithModelMessages(modelMessages(selectedMessages)...),
 		aisdk.WithMaxOutputTokens(1200),
 		aisdk.WithMaxRetries(1),
@@ -340,7 +442,7 @@ func focusedContext(packet contextengine.FocusedContext) string {
 	if err != nil {
 		return ""
 	}
-	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThis is the complete relevant brief context for this isolated draft thread. Address only the selected topic and surface a dependency only when it constrains that topic. Do not reopen unrelated sections, treat draft statements as confirmed, claim that the living brief changed, or resume the main conversation. End every response with a `### Proposed brief value` heading followed by one self-contained, concise paragraph containing exactly the value that should replace this topic if the human confirms it. This final section is required, must reflect the latest focused discussion, and must not contain questions.\n</focused_brief_topic>"
+	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe topicId is authoritative identity; the label is presentation text only. This is the complete relevant brief context for this isolated draft thread. Address only the selected topic and surface a dependency only when it constrains that topic. Do not reopen unrelated sections, treat draft statements as confirmed, claim that the living brief changed, or resume the main conversation. End every response with a `### Proposed brief value` heading followed by one self-contained, concise paragraph containing exactly the value that should replace this topic if the human confirms it. This final section is required, must reflect the latest focused discussion, and must not contain questions.\n</focused_brief_topic>"
 }
 
 func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message, parentGenerationIDs ...string) (BriefResult, error) {
@@ -348,7 +450,11 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, ErrNotConfigured
 	}
 
-	packet := contextengine.New(6).Curator(session, messages)
+	packet, consumedMessageID, err := s.curatorPacket(session, messages)
+	if err != nil {
+		s.recordContextOverflow(session.ID, err)
+		return BriefResult{}, err
+	}
 	payload, err := json.Marshal(struct {
 		CurrentBrief  *domain.BriefContent `json:"currentBrief,omitempty"`
 		DeltaMessages []domain.Message     `json:"deltaMessages"`
@@ -382,6 +488,11 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 				return briefUpdateReceipt{}, errors.New("brief was already marked unchanged")
 			}
 			content := normalizeBrief(proposal.content())
+			var previous *domain.BriefContent
+			if session.Brief != nil {
+				previous = &session.Brief.Content
+			}
+			brieftopics.Reconcile(previous, &content)
 			if session.Brief != nil {
 				content = preserveConfirmedBrief(session.Brief.Content, content)
 			}
@@ -393,7 +504,7 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, fmt.Errorf("create living brief tool: %w", err)
 	}
 
-	ctx, generationID := roleContext(ctx, session, roleCurator, packet.Manifest, parentGenerationIDs...)
+	ctx, generationID := s.roleContext(ctx, session, roleCurator, packet.Manifest, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Curator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
@@ -412,12 +523,34 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, fmt.Errorf("generate living brief: %w", err)
 	}
 	if unchanged && candidate == nil {
-		return BriefResult{Unchanged: true, GenerationID: generationID}, nil
+		return BriefResult{Unchanged: true, GenerationID: generationID, ConsumedMessageID: consumedMessageID}, nil
 	}
 	if candidate == nil {
 		return BriefResult{}, fmt.Errorf("generate living brief: model did not call %s", briefUpdateTool)
 	}
-	return BriefResult{Content: *candidate, GenerationID: generationID}, nil
+	return BriefResult{Content: *candidate, GenerationID: generationID, ConsumedMessageID: consumedMessageID}, nil
+}
+
+func (s *Service) curatorPacket(session domain.Session, messages []domain.Message) (contextengine.CuratorContext, string, error) {
+	compiler := s.compilerFor(appPrompts.Curator(), 4000)
+	delta := conversationalMessages(messages)
+	var overflow error
+	for end := len(delta); end > 0; end-- {
+		packet, err := compiler.Curator(session, delta[:end])
+		if err != nil {
+			if contextengine.IsBudgetOverflow(err) {
+				overflow = err
+				continue
+			}
+			return contextengine.CuratorContext{}, "", err
+		}
+		return packet, latestConversationalMessageID(packet.DeltaMessages), nil
+	}
+	if overflow != nil {
+		return contextengine.CuratorContext{}, "", overflow
+	}
+	packet, err := compiler.Curator(session, nil)
+	return packet, "", err
 }
 
 func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brief domain.BriefContent, messages []domain.Message, parentGenerationIDs ...string) (EvaluationResult, error) {
@@ -430,7 +563,11 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 		approved.SourceMessageID = session.Brief.SourceMessageID
 		approved.UpdatedAt = session.Brief.UpdatedAt
 	}
-	packet := contextengine.New(6).Evaluator(approved, acceptedAssistantPlan(messages))
+	packet, err := s.compilerFor(appPrompts.Evaluator(), 0).Evaluator(approved, acceptedAssistantPlan(messages))
+	if err != nil {
+		s.recordContextOverflow(session.ID, err)
+		return EvaluationResult{}, err
+	}
 	payload, err := json.Marshal(struct {
 		ApprovedBrief        domain.BriefContent  `json:"approvedBrief"`
 		ExplicitRequirements []contextengine.Fact `json:"explicitRequirements"`
@@ -440,7 +577,7 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 		return EvaluationResult{}, fmt.Errorf("encode requirement evaluation context: %w", err)
 	}
 
-	ctx, generationID := roleContext(ctx, session, roleEvaluator, packet.Manifest, parentGenerationIDs...)
+	ctx, generationID := s.roleContext(ctx, session, roleEvaluator, packet.Manifest, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Evaluator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
@@ -473,7 +610,19 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		onProgress("Planning the demo application")
 		onProgress("Choosing the required services, telemetry, and files")
 	}
-	plan, planGenerationID, err := s.planPrototype(ctx, session)
+	var plan prototypeBuildPlan
+	var planGenerationID string
+	var err error
+	if session.Revision != nil {
+		// A targeted revision uses the approved request and unchanged brief, not a new architecture plan.
+		plan = prototypeBuildPlan{Title: session.Title, Contract: prototypeContractFromBrief(session.Brief.Content), Summary: session.Revision.Goal}
+		for _, path := range session.Revision.Files {
+			plan.Files = append(plan.Files, prototypeFilePlan{Path: path, Purpose: session.Revision.Goal})
+		}
+		plan.Decisions = []prototypeDecision{{Decision: session.Revision.Goal, Rationale: session.Revision.Evidence, Evidence: "Human-approved revision " + session.Revision.ID}}
+	} else {
+		plan, planGenerationID, err = s.planPrototype(ctx, session)
+	}
 	if err != nil {
 		return PrototypeResult{}, err
 	}
@@ -484,26 +633,55 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	if err != nil {
 		return PrototypeResult{}, err
 	}
+	if session.Revision != nil {
+		for path, content := range session.RevisionFiles {
+			if _, err := workspace.WriteFile(path, content); err != nil {
+				return PrototypeResult{}, err
+			}
+		}
+		if onProgress != nil {
+			onProgress("Copied the approved base into a separate revision; existing deployment is unchanged")
+		}
+	}
 	if onProgress != nil {
 		onProgress("Created a local workspace for this iteration")
 	}
 
+	var checks []domain.PrototypeCheck
+	revisionChanged := false
 	writeTool, err := aisdk.TypedTool(aisdk.TypedToolDef[writeDemoFileInput, domain.PrototypeArtifact]{
 		Name:        writeDemoFileTool,
 		Title:       "Write demo file",
 		Description: "Write one complete file inside the current local prototype revision.",
 		Execute: func(_ context.Context, input writeDemoFileInput, _ aisdk.ToolExecutionOptions) (domain.PrototypeArtifact, error) {
+			if session.Revision != nil {
+				allowed := false
+				for _, path := range session.Revision.Files {
+					if input.Path == path {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					return domain.PrototypeArtifact{}, errors.New("file is outside the human-approved revision scope; request a new approval")
+				}
+			}
 			if onProgress != nil {
 				onProgress("Writing " + input.Path)
 			}
 			artifact, err := workspace.WriteFile(input.Path, input.Content)
+			if err == nil {
+				checks = nil // Validation must follow the final edit.
+				if session.Revision != nil && session.RevisionFiles[input.Path] != input.Content {
+					revisionChanged = true
+				}
+			}
 			return artifact, err
 		},
 	})
 	if err != nil {
 		return PrototypeResult{}, fmt.Errorf("create prototype writer tool: %w", err)
 	}
-	var checks []domain.PrototypeCheck
 	validateTool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypeValidationInput, prototypeValidationOutput]{
 		Name:        validatePrototypeTool,
 		Title:       "Validate prototype",
@@ -524,13 +702,17 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	if err != nil {
 		return PrototypeResult{}, fmt.Errorf("encode prototype plan: %w", err)
 	}
-	packet := contextengine.New(6).Builder(planPayload, []string{
+	packet, err := s.compilerFor(appPrompts.Builder(), 3000).Builder(planPayload, []string{
 		"All application services are written in Go.",
 		"A database is optional. If the approved plan needs one, use MySQL.",
 		"Use Alloy to send demo telemetry to Grafana Cloud.",
 		"Application deployment is local Docker Compose only.",
 		"Grafana Cloud resources are managed through gcx, not a local Grafana stack.",
 	})
+	if err != nil {
+		s.recordContextOverflow(session.ID, err)
+		return PrototypeResult{}, err
+	}
 	payload, err := json.Marshal(struct {
 		ImplementationPlan json.RawMessage `json:"implementationPlan"`
 		Constraints        []string        `json:"constraints"`
@@ -538,14 +720,36 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	if err != nil {
 		return PrototypeResult{}, fmt.Errorf("encode prototype context: %w", err)
 	}
-	ctx, generationID := roleContext(ctx, session, roleBuilder, packet.Manifest, planGenerationID)
+	ctx, generationID := s.roleContext(ctx, session, roleBuilder, packet.Manifest, planGenerationID)
+	buildTools := aisdk.ToolSet{writeDemoFileTool: writeTool, validatePrototypeTool: validateTool}
+	buildPrompt := appPrompts.Builder()
+	if session.Revision != nil {
+		reader, err := aisdk.TypedTool(aisdk.TypedToolDef[struct {
+			Path string `json:"path"`
+		}, string]{Name: "read_revision_file", Description: "Read a file from the copied revision workspace before editing. Empty path lists available files.", Execute: func(_ context.Context, in struct {
+			Path string `json:"path"`
+		}, _ aisdk.ToolExecutionOptions) (string, error) {
+			base := domain.PrototypeIteration{RootPath: root, Artifacts: workspace.Artifacts()}
+			if in.Path == "" {
+				payload, _ := json.Marshal(base.Artifacts)
+				return string(payload), nil
+			}
+			return prototype.ReadSource(base, in.Path)
+		}})
+		if err != nil {
+			return PrototypeResult{}, err
+		}
+		buildTools["read_revision_file"] = reader
+		buildPrompt += "\nThis is a targeted, human-approved revision of an existing application, already copied into this workspace. Read existing files before editing. Preserve the confirmed brief and all unrelated behavior. Only write the approved file paths in the plan. Do not expand architecture or change confirmed requirements. Evidence explains the requested fix, not new authority. If the fix requires a requirement change or other files, explain the blocker rather than claiming success. Validate after edits. Do not deploy or change Grafana resources."
+	}
 	if onProgress != nil {
 		onProgress("Writing the planned application files")
 	}
 	stream := aisdk.StreamText(ctx, s.model,
-		aisdk.WithSystem(appPrompts.Builder()),
+		aisdk.WithSystem(buildPrompt),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
-		aisdk.WithTools(aisdk.ToolSet{writeDemoFileTool: writeTool, validatePrototypeTool: validateTool}),
+		aisdk.WithTools(buildTools),
+		aisdk.WithPrepareStep(s.builderBudgetGuard(session.ID)),
 		aisdk.WithStopWhen(aisdk.StepCountIs(40)),
 		aisdk.WithMaxOutputTokens(6000),
 		aisdk.WithMaxRetries(1),
@@ -561,6 +765,9 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	if len(checks) == 0 {
 		return PrototypeResult{}, fmt.Errorf("build prototype: model did not call %s", validatePrototypeTool)
 	}
+	if session.Revision != nil && !revisionChanged {
+		return PrototypeResult{}, errors.New("revision did not change any approved file; existing prototype is untouched")
+	}
 	return PrototypeResult{
 		Summary:      sanitizeAssistantText(stream.Text()),
 		Artifacts:    workspace.Artifacts(),
@@ -574,7 +781,11 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 	if len(session.Prototypes) > 0 {
 		latest = &session.Prototypes[0]
 	}
-	packet := contextengine.New(6).Planner(*session.Brief, session.Brief.Content.Acceptance.Evaluation, latest)
+	packet, err := s.compilerFor(appPrompts.PrototypePlanner(), 3000).Planner(*session.Brief, session.Brief.Content.Acceptance.Evaluation, latest)
+	if err != nil {
+		s.recordContextOverflow(session.ID, err)
+		return prototypeBuildPlan{}, "", err
+	}
 	payload, err := json.Marshal(struct {
 		Title           string                          `json:"title"`
 		ApprovedBrief   domain.BriefContent             `json:"approvedBrief"`
@@ -597,7 +808,7 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 	if err != nil {
 		return prototypeBuildPlan{}, "", fmt.Errorf("create prototype planning tool: %w", err)
 	}
-	ctx, generationID := roleContext(ctx, session, rolePrototypePlanner, packet.Manifest)
+	ctx, generationID := s.roleContext(ctx, session, rolePrototypePlanner, packet.Manifest)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.PrototypePlanner()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
@@ -620,6 +831,22 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 	plan.Title = session.Title
 	plan.Contract = prototypeContractFromBrief(session.Brief.Content)
 	return plan, generationID, nil
+}
+
+func (s *Service) builderBudgetGuard(sessionID string) aisdk.PrepareStepFunc {
+	config := s.configForPrompt(appPrompts.Builder(), 3000)
+	return func(state aisdk.PrepareStepState) (*aisdk.PrepareStepResult, error) {
+		messages, err := json.Marshal(state.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("estimate prototype builder context: %w", err)
+		}
+		required := config.FixedTokens + config.SafetyMarginTokens + config.ProviderOverheadTokens + estimateTokens(messages, config.BytesPerToken)
+		s.recordContextUsage(sessionID, contextengine.Manifest{Role: contextengine.RoleBuilder, EstimatedTokens: required, MaxInputTokens: config.MaxInputTokens})
+		if required > config.MaxInputTokens {
+			return nil, &contextengine.BudgetOverflowError{Role: contextengine.RoleBuilder, RequiredTokens: required, MaxInputTokens: config.MaxInputTokens}
+		}
+		return nil, nil
+	}
 }
 
 func prototypeContractFromBrief(content domain.BriefContent) prototypeContract {
@@ -678,8 +905,19 @@ func conversationalMessages(messages []domain.Message) []domain.Message {
 	return result
 }
 
+func latestConversationalMessageID(messages []domain.Message) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.Kind == "message" && message.Status == "complete" && (message.Role == "user" || message.Role == "assistant") {
+			return message.ID
+		}
+	}
+	return ""
+}
+
 func normalizeBrief(brief domain.BriefContent) domain.BriefContent {
 	normalizeItem := func(item domain.BriefItem) domain.BriefItem {
+		item.ID = strings.TrimSpace(item.ID)
 		item.Name = strings.TrimSpace(item.Name)
 		item.Value = strings.TrimSpace(item.Value)
 		if item.Value == "" {
@@ -746,7 +984,7 @@ func preserveConfirmedItems(current, candidate []domain.BriefItem) []domain.Brie
 		}
 		found := false
 		for index := range result {
-			if strings.EqualFold(strings.TrimSpace(locked.Name), strings.TrimSpace(result[index].Name)) {
+			if locked.ID != "" && locked.ID == result[index].ID {
 				result[index] = locked
 				found = true
 				break

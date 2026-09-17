@@ -112,11 +112,15 @@ plan; that belongs to the independent Requirement Evaluator.
 ## Status values
 
 Every brief item status is exactly `unknown`, `proposed`, or `confirmed`.
+Topic IDs are owned by the application. For an existing collection item, copy
+its `id` from `currentBrief` exactly even if its display name changes. For a new
+collection item, omit `id`; never invent one. The application validates every
+returned ID and assigns IDs to new items.
 
 Use this reusable brief item shape:
 
 ```json
-{"name":"string","value":"string","status":"unknown|proposed|confirmed"}
+{"id":"existing-id-or-omit-for-new","name":"string","value":"string","status":"unknown|proposed|confirmed"}
 ```
 
 ## Tool contract
@@ -134,15 +138,15 @@ keep the complete tool input below 4,000 tokens.
   "stakes": {"name":"Stakes","value":"string","status":"unknown|proposed|confirmed"},
   "scenario": {"name":"Scenario","value":"string","status":"unknown|proposed|confirmed"},
   "journey": {"name":"Journey","value":"string","status":"unknown|proposed|confirmed"},
-  "proofPoints": [{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],
+  "proofPoints": [{"id":"existing-id-or-omit","name":"string","value":"string","status":"unknown|proposed|confirmed"}],
   "scope": {
-    "included": [{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],
-    "excluded": [{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],
+    "included": [{"id":"existing-id-or-omit","name":"string","value":"string","status":"unknown|proposed|confirmed"}],
+    "excluded": [{"id":"existing-id-or-omit","name":"string","value":"string","status":"unknown|proposed|confirmed"}],
     "simulationBoundary": {"name":"Simulation boundary","value":"string","status":"unknown|proposed|confirmed"}
   },
-  "services": [{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],
-  "telemetry": [{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],
-  "grafanaResources": [{"name":"string","value":"string","status":"unknown|proposed|confirmed"}],
+  "services": [{"id":"existing-id-or-omit","name":"string","value":"string","status":"unknown|proposed|confirmed"}],
+  "telemetry": [{"id":"existing-id-or-omit","name":"string","value":"string","status":"unknown|proposed|confirmed"}],
+  "grafanaResources": [{"id":"existing-id-or-omit","name":"string","value":"string","status":"unknown|proposed|confirmed"}],
   "narrative": [{"stage":"audience_stakes|normal|change|investigate|act|recover_outcome","detail":"string","minutes":1}],
   "mermaid": "flowchart LR...",
   "openQuestions": ["string"],

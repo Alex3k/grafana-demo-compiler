@@ -6,15 +6,27 @@ package contextengine
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/brieftopics"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 )
 
-const SchemaVersion = "context.v1"
+const SchemaVersion = "context.v2"
 
 const defaultRecentMessageLimit = 6
+const defaultFocusedMessageLimit = 12
+
+const (
+	defaultMaxInputTokens         = 32_000
+	defaultFixedTokens            = 2_500
+	defaultSafetyMarginTokens     = 1_500
+	defaultProviderOverheadTokens = 1_000
+	defaultBytesPerToken          = 3
+)
 
 type Role string
 
@@ -30,19 +42,78 @@ const (
 // Manifest describes what was selected without exposing prompt contents.
 // It is suitable for attaching to Agent Observability generations.
 type Manifest struct {
-	SchemaVersion            string   `json:"schemaVersion"`
-	Role                     Role     `json:"role"`
-	BriefVersion             int      `json:"briefVersion,omitempty"`
-	IncludedMessageCount     int      `json:"includedMessageCount"`
-	IncludedTopicKeys        []string `json:"includedTopicKeys,omitempty"`
-	IncludesOperationalState bool     `json:"includesOperationalState"`
-	ApproximateCharacters    int      `json:"approximateCharacters"`
+	SchemaVersion            string            `json:"schemaVersion"`
+	Role                     Role              `json:"role"`
+	BriefVersion             int               `json:"briefVersion,omitempty"`
+	IncludedMessageCount     int               `json:"includedMessageCount"`
+	IncludedTopicKeys        []string          `json:"includedTopicKeys,omitempty"`
+	IncludesOperationalState bool              `json:"includesOperationalState"`
+	ApproximateCharacters    int               `json:"approximateCharacters"`
+	EstimatedTokens          int               `json:"estimatedTokens"`
+	MaxInputTokens           int               `json:"maxInputTokens"`
+	FixedTokens              int               `json:"fixedTokens"`
+	SafetyMarginTokens       int               `json:"safetyMarginTokens"`
+	ProviderOverheadTokens   int               `json:"providerOverheadTokens"`
+	Estimator                string            `json:"estimator"`
+	IncludedSections         []SectionDecision `json:"includedSections"`
+	DroppedSections          []SectionDecision `json:"droppedSections,omitempty"`
+	Truncated                bool              `json:"truncated"`
+}
+
+// SectionDecision explains a deterministic context-budget decision without
+// exposing the section's contents.
+type SectionDecision struct {
+	Name            string `json:"name"`
+	Required        bool   `json:"required"`
+	Priority        int    `json:"priority"`
+	EstimatedTokens int    `json:"estimatedTokens"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+// Config controls deterministic context bounds and the conservative token
+// estimate. Start with DefaultConfig and override the fields needed by the
+// caller. Non-positive values are restored to their defaults.
+type Config struct {
+	RecentMessageLimit     int
+	FocusedMessageLimit    int
+	MaxInputTokens         int
+	FixedTokens            int
+	SafetyMarginTokens     int
+	ProviderOverheadTokens int
+	BytesPerToken          int
+}
+
+func DefaultConfig() Config {
+	return Config{
+		RecentMessageLimit: defaultRecentMessageLimit, FocusedMessageLimit: defaultFocusedMessageLimit,
+		MaxInputTokens: defaultMaxInputTokens, FixedTokens: defaultFixedTokens,
+		SafetyMarginTokens: defaultSafetyMarginTokens, ProviderOverheadTokens: defaultProviderOverheadTokens,
+		BytesPerToken: defaultBytesPerToken,
+	}
+}
+
+// BudgetOverflowError reports when authoritative context cannot fit. Callers
+// should fail the generation rather than silently omit required information.
+type BudgetOverflowError struct {
+	Role           Role
+	RequiredTokens int
+	MaxInputTokens int
+}
+
+func (e *BudgetOverflowError) Error() string {
+	return fmt.Sprintf("%s required context needs %d tokens, exceeding %d token input budget", e.Role, e.RequiredTokens, e.MaxInputTokens)
+}
+
+func IsBudgetOverflow(err error) bool {
+	var target *BudgetOverflowError
+	return errors.As(err, &target)
 }
 
 type Fact struct {
-	Topic string `json:"topic"`
-	Name  string `json:"name,omitempty"`
-	Value string `json:"value"`
+	TopicID string `json:"topicId"`
+	Topic   string `json:"topic"`
+	Name    string `json:"name,omitempty"`
+	Value   string `json:"value"`
 }
 
 type OperationalState struct {
@@ -90,7 +161,7 @@ type DeploymentSummary struct {
 }
 
 type CollaboratorContext struct {
-	Manifest           Manifest                   `json:"manifest"`
+	Manifest           Manifest                   `json:"-"`
 	CurrentUserMessage *domain.Message            `json:"currentUserMessage,omitempty"`
 	RecentMessages     []domain.Message           `json:"recentMessages,omitempty"`
 	ConfirmedFacts     []Fact                     `json:"confirmedFacts,omitempty"`
@@ -101,13 +172,13 @@ type CollaboratorContext struct {
 }
 
 type CuratorContext struct {
-	Manifest      Manifest             `json:"manifest"`
+	Manifest      Manifest             `json:"-"`
 	CurrentBrief  *domain.BriefContent `json:"currentBrief,omitempty"`
 	DeltaMessages []domain.Message     `json:"deltaMessages"`
 }
 
 type FocusedContext struct {
-	Manifest          Manifest          `json:"manifest"`
+	Manifest          Manifest          `json:"-"`
 	SelectedTopic     domain.BriefFocus `json:"selectedTopic"`
 	GlobalConstraints []Fact            `json:"globalConstraints,omitempty"`
 	Dependencies      []Fact            `json:"dependencies,omitempty"`
@@ -115,38 +186,65 @@ type FocusedContext struct {
 }
 
 type EvaluatorContext struct {
-	Manifest             Manifest            `json:"manifest"`
+	Manifest             Manifest            `json:"-"`
 	ApprovedBrief        domain.BriefContent `json:"approvedBrief"`
 	ExplicitRequirements []Fact              `json:"explicitRequirements"`
 	CandidatePlan        string              `json:"candidatePlan"`
 }
 
 type PlannerContext struct {
-	Manifest        Manifest                   `json:"manifest"`
+	Manifest        Manifest                   `json:"-"`
 	ApprovedBrief   domain.BriefContent        `json:"approvedBrief"`
 	Evaluation      domain.AlignmentEvaluation `json:"evaluation"`
 	LatestPrototype *PrototypeSummary          `json:"latestPrototype,omitempty"`
 }
 
 type BuilderContext struct {
-	Manifest           Manifest        `json:"manifest"`
+	Manifest           Manifest        `json:"-"`
 	ImplementationPlan json.RawMessage `json:"implementationPlan"`
 	Constraints        []string        `json:"constraints"`
 }
 
 // Compiler controls deterministic context bounds.
 type Compiler struct {
-	RecentMessageLimit int
+	config Config
 }
 
 func New(recentMessageLimit int) Compiler {
-	if recentMessageLimit <= 0 {
-		recentMessageLimit = defaultRecentMessageLimit
+	config := DefaultConfig()
+	if recentMessageLimit > 0 {
+		config.RecentMessageLimit = recentMessageLimit
 	}
-	return Compiler{RecentMessageLimit: recentMessageLimit}
+	return NewWithConfig(config)
 }
 
-func (c Compiler) Collaborator(session domain.Session) CollaboratorContext {
+func NewWithConfig(config Config) Compiler {
+	defaults := DefaultConfig()
+	if config.RecentMessageLimit <= 0 {
+		config.RecentMessageLimit = defaults.RecentMessageLimit
+	}
+	if config.FocusedMessageLimit <= 0 {
+		config.FocusedMessageLimit = defaults.FocusedMessageLimit
+	}
+	if config.MaxInputTokens <= 0 {
+		config.MaxInputTokens = defaults.MaxInputTokens
+	}
+	if config.FixedTokens <= 0 {
+		config.FixedTokens = defaults.FixedTokens
+	}
+	if config.SafetyMarginTokens <= 0 {
+		config.SafetyMarginTokens = defaults.SafetyMarginTokens
+	}
+	if config.ProviderOverheadTokens <= 0 {
+		config.ProviderOverheadTokens = defaults.ProviderOverheadTokens
+	}
+	if config.BytesPerToken <= 0 {
+		config.BytesPerToken = defaults.BytesPerToken
+	}
+	return Compiler{config: config}
+}
+
+func (c Compiler) Collaborator(session domain.Session) (CollaboratorContext, error) {
 	complete := conversationalMessages(session.Messages)
 	currentIndex := -1
 	for index := len(complete) - 1; index >= 0; index-- {
@@ -182,87 +280,174 @@ func (c Compiler) Collaborator(session domain.Session) CollaboratorContext {
 		ConfirmedFacts:     facts,
 		ProposedFacts:      proposals,
 		OpenQuestions:      questions,
-		ReferenceState:     collaboratorReferenceState(session.Brief, current),
+		ReferenceState:     collaboratorReferenceState(session.Brief),
 		OperationalState:   operationalState(session),
 	}
-	topics := append(factTopics(facts), factTopics(proposals)...)
-	result.Manifest = manifest(RoleCollaborator, briefVersion, len(recent)+boolCount(current != nil), topics, true, result)
-	return result
+	sections := []budgetSection{
+		section("current_user", true, 100, current, nil, nil),
+		section("confirmed_facts", true, 100, facts, factTopics(facts), nil),
+		section("recent_messages", false, 70, recent, nil, func() { result.RecentMessages = nil }),
+		section("proposed_facts", false, 60, proposals, factTopics(proposals), func() { result.ProposedFacts = nil }),
+		section("open_questions", false, 65, questions, nil, func() { result.OpenQuestions = nil }),
+		section("reference_state", false, 90, result.ReferenceState, nil, func() { result.ReferenceState = CollaboratorReferenceState{} }),
+		section("operational_state", false, 80, result.OperationalState, nil, func() { result.OperationalState = OperationalState{} }),
+	}
+	manifest, err := c.manifest(RoleCollaborator, briefVersion, len(recent)+boolCount(current != nil), true, sections)
+	if err != nil {
+		return CollaboratorContext{}, err
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
 // Curator includes only the caller-supplied delta, never the session history.
-func (c Compiler) Curator(session domain.Session, delta []domain.Message) CuratorContext {
+func (c Compiler) Curator(session domain.Session, delta []domain.Message) (CuratorContext, error) {
 	messages := conversationalMessages(delta)
 	result := CuratorContext{CurrentBrief: cloneBriefContent(session.Brief), DeltaMessages: messages}
 	version := 0
 	if session.Brief != nil {
 		version = session.Brief.Version
 	}
-	result.Manifest = manifest(RoleCurator, version, len(messages), nil, false, result)
-	return result
+	manifest, err := c.manifest(RoleCurator, version, len(messages), false, []budgetSection{
+		section("current_brief", true, 100, result.CurrentBrief, nil, nil),
+		section("delta_messages", true, 100, messages, nil, nil),
+	})
+	if err != nil {
+		return CuratorContext{}, err
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
 // Focused selects the chosen topic, global confirmed scope constraints, and
 // confirmed facts which the chosen topic directly depends on.
-func (c Compiler) Focused(session domain.Session, focus domain.BriefFocus, messages []domain.Message) FocusedContext {
+func (c Compiler) Focused(session domain.Session, focus domain.BriefFocus, messages []domain.Message) (FocusedContext, error) {
 	facts := confirmedFacts(session.Brief)
-	topic := topicKey(focus.Label)
-	constraints := filterFacts(facts, func(f Fact) bool { return strings.HasPrefix(f.Topic, "scope.") })
-	dependencies := filterFacts(facts, func(f Fact) bool { return factMatchesFocus(topic, f) || focusedDependency(topic, f.Topic) })
+	topic := focus.TopicID
+	constraints := filterFacts(facts, func(f Fact) bool { return brieftopics.IsScope(f.TopicID) })
+	dependencies := filterFacts(facts, func(f Fact) bool { return brieftopics.IsDependency(topic, f.TopicID) })
 	dependencies = removeFacts(dependencies, constraints)
-	focusedMessages := conversationalMessages(messages)
+	complete := conversationalMessages(messages)
+	focusedMessages := tailMessages(complete, c.focusedLimit())
+	// The history window must not discard the request before budgeting it.
+	for index := len(complete) - 1; index >= 0; index-- {
+		if complete[index].Role == "user" {
+			if index < len(complete)-len(focusedMessages) {
+				focusedMessages[0] = complete[index]
+			}
+			break
+		}
+	}
 	version := 0
 	if session.Brief != nil {
 		version = session.Brief.Version
 	}
-	topics := append([]string{topic}, factTopics(constraints)...)
-	topics = append(topics, factTopics(dependencies)...)
 	result := FocusedContext{
 		SelectedTopic:     focus,
 		GlobalConstraints: constraints,
 		Dependencies:      dependencies,
 		FocusedMessages:   focusedMessages,
 	}
-	result.Manifest = manifest(RoleFocused, version, len(focusedMessages), topics, false, result)
-	return result
+	sections := []budgetSection{
+		section("selected_topic", true, 100, focus, []string{topic}, nil),
+		section("global_constraints", true, 100, constraints, factTopics(constraints), nil),
+		section("dependencies", false, 80, dependencies, factTopics(dependencies), func() { result.Dependencies = nil }),
+	}
+	latestUser := -1
+	for index := len(focusedMessages) - 1; index >= 0; index-- {
+		if focusedMessages[index].Role == "user" {
+			latestUser = index
+			break
+		}
+	}
+	dropped := make([]bool, len(focusedMessages))
+	// Equal-priority messages are considered newest first by their section name.
+	// Keep the original chronological order when assembling the final packet.
+	for index := len(focusedMessages) - 1; index >= 0; index-- {
+		name := fmt.Sprintf("focused_message_%08d", len(focusedMessages)-1-index)
+		sections = append(sections, section(name, index == latestUser, 70, focusedMessages[index], nil, func() { dropped[index] = true }))
+	}
+	manifest, err := c.manifest(RoleFocused, version, len(focusedMessages), false, sections)
+	if err != nil {
+		return FocusedContext{}, err
+	}
+	result.FocusedMessages = nil
+	for index, message := range focusedMessages {
+		if !dropped[index] {
+			result.FocusedMessages = append(result.FocusedMessages, message)
+		}
+	}
+	manifest.IncludedMessageCount = len(result.FocusedMessages)
+	result.Manifest = manifest
+	return result, nil
 }
 
-func (c Compiler) Evaluator(approved domain.LivingBrief, candidatePlan string) EvaluatorContext {
+func (c Compiler) Evaluator(approved domain.LivingBrief, candidatePlan string) (EvaluatorContext, error) {
 	requirements := confirmedFacts(&approved)
 	result := EvaluatorContext{
 		ApprovedBrief:        approved.Content,
 		ExplicitRequirements: requirements,
 		CandidatePlan:        candidatePlan,
 	}
-	result.Manifest = manifest(RoleEvaluator, approved.Version, 0, factTopics(requirements), false, result)
-	return result
+	manifest, err := c.manifest(RoleEvaluator, approved.Version, 0, false, []budgetSection{
+		section("approved_brief", true, 100, result.ApprovedBrief, nil, nil),
+		section("explicit_requirements", true, 100, requirements, factTopics(requirements), nil),
+		section("candidate_plan", true, 100, candidatePlan, nil, nil),
+	})
+	if err != nil {
+		return EvaluatorContext{}, err
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
-func (c Compiler) Planner(approved domain.LivingBrief, evaluation domain.AlignmentEvaluation, latest *domain.PrototypeIteration) PlannerContext {
+func (c Compiler) Planner(approved domain.LivingBrief, evaluation domain.AlignmentEvaluation, latest *domain.PrototypeIteration) (PlannerContext, error) {
 	result := PlannerContext{ApprovedBrief: approved.Content, Evaluation: evaluation}
 	if latest != nil {
 		result.LatestPrototype = prototypeSummary(*latest, true)
 	}
-	result.Manifest = manifest(RolePlanner, approved.Version, 0, factTopics(confirmedFacts(&approved)), false, result)
-	return result
+	manifest, err := c.manifest(RolePlanner, approved.Version, 0, false, []budgetSection{
+		section("approved_brief", true, 100, result.ApprovedBrief, factTopics(confirmedFacts(&approved)), nil),
+		section("evaluation", true, 100, evaluation, nil, nil),
+		section("latest_prototype", false, 60, result.LatestPrototype, nil, func() { result.LatestPrototype = nil }),
+	})
+	if err != nil {
+		return PlannerContext{}, err
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
 // Builder accepts serialized plan data to avoid coupling this package to the
 // chat provider's private plan types.
-func (c Compiler) Builder(plan json.RawMessage, constraints []string) BuilderContext {
+func (c Compiler) Builder(plan json.RawMessage, constraints []string) (BuilderContext, error) {
 	result := BuilderContext{
 		ImplementationPlan: append(json.RawMessage(nil), plan...),
 		Constraints:        append([]string(nil), constraints...),
 	}
-	result.Manifest = manifest(RoleBuilder, 0, 0, nil, false, result)
-	return result
+	manifest, err := c.manifest(RoleBuilder, 0, 0, false, []budgetSection{
+		section("implementation_plan", true, 100, result.ImplementationPlan, nil, nil),
+		section("constraints", true, 100, result.Constraints, nil, nil),
+	})
+	if err != nil {
+		return BuilderContext{}, err
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
 func (c Compiler) limit() int {
-	if c.RecentMessageLimit <= 0 {
+	if c.config.RecentMessageLimit <= 0 {
 		return defaultRecentMessageLimit
 	}
-	return c.RecentMessageLimit
+	return c.config.RecentMessageLimit
+}
+
+func (c Compiler) focusedLimit() int {
+	if c.config.FocusedMessageLimit <= 0 {
+		return defaultFocusedMessageLimit
+	}
+	return c.config.FocusedMessageLimit
 }
 
 func conversationalMessages(messages []domain.Message) []domain.Message {
@@ -289,32 +474,36 @@ func factsWithStatus(brief *domain.LivingBrief, status string) []Fact {
 	}
 	content := brief.Content
 	var facts []Fact
-	addItem := func(topic string, item domain.BriefItem) {
+	addItem := func(topic, fallbackID string, item domain.BriefItem) {
 		if item.Status == status && strings.TrimSpace(item.Value) != "" {
-			facts = append(facts, Fact{Topic: topic, Name: item.Name, Value: item.Value})
+			topicID := item.ID
+			if topicID == "" {
+				topicID = fallbackID
+			}
+			facts = append(facts, Fact{TopicID: topicID, Topic: topic, Name: item.Name, Value: item.Value})
 		}
 	}
-	addItem("audience", content.Audience)
-	addItem("company", content.Company)
-	addItem("outcome", content.Outcome)
-	addItem("stakes", content.Stakes)
-	addItem("scenario", content.Scenario)
-	addItem("journey", content.Journey)
+	addItem("audience", brieftopics.Audience, content.Audience)
+	addItem("company", brieftopics.Company, content.Company)
+	addItem("outcome", brieftopics.Outcome, content.Outcome)
+	addItem("stakes", brieftopics.Stakes, content.Stakes)
+	addItem("scenario", brieftopics.Scenario, content.Scenario)
+	addItem("journey", brieftopics.Journey, content.Journey)
 	addItems := func(topic string, items []domain.BriefItem) {
 		for _, item := range items {
-			addItem(topic, item)
+			addItem(topic, "", item)
 		}
 	}
 	addItems("proof_points", content.ProofPoints)
 	addItems("scope.included", content.Scope.Included)
 	addItems("scope.excluded", content.Scope.Excluded)
-	addItem("scope.simulation_boundary", content.Scope.SimulationBoundary)
+	addItem("scope.simulation_boundary", brieftopics.SimulationBoundary, content.Scope.SimulationBoundary)
 	addItems("services", content.Services)
 	addItems("telemetry", content.Telemetry)
 	addItems("grafana_resources", content.GrafanaResources)
 	for _, decision := range content.Decisions {
 		if decision.Status == status && strings.TrimSpace(decision.Summary) != "" {
-			facts = append(facts, Fact{Topic: "decisions", Name: decision.Evidence, Value: decision.Summary})
+			facts = append(facts, Fact{TopicID: "decisions", Topic: "decisions", Name: decision.Evidence, Value: decision.Summary})
 		}
 	}
 	return facts
@@ -392,33 +581,20 @@ func prototypeSummary(item domain.PrototypeIteration, includeIterationDetails bo
 	return result
 }
 
-func collaboratorReferenceState(brief *domain.LivingBrief, current *domain.Message) CollaboratorReferenceState {
-	if brief == nil || current == nil {
+func collaboratorReferenceState(brief *domain.LivingBrief) CollaboratorReferenceState {
+	if brief == nil {
 		return CollaboratorReferenceState{}
 	}
-	query := strings.ToLower(current.Content)
-	wants := func(words ...string) bool {
-		for _, word := range words {
-			if strings.Contains(query, word) {
-				return true
-			}
-		}
-		return false
+	offer := brief.Content.PrototypeOffer
+	acceptance := brief.Content.Acceptance
+	result := CollaboratorReferenceState{
+		Mermaid:   brief.Content.Mermaid,
+		Narrative: append([]domain.NarrativeBeat(nil), brief.Content.Narrative...),
 	}
-	all := wants("agreed", "brief", "plan", "everything", "summary")
-	result := CollaboratorReferenceState{}
-	if all || wants("architecture", "diagram", "mermaid") {
-		result.Mermaid = brief.Content.Mermaid
-	}
-	if all || wants("narrative", "story", "timeline", "run of show") {
-		result.Narrative = append([]domain.NarrativeBeat(nil), brief.Content.Narrative...)
-	}
-	if all || wants("prototype", "build", "generate", "scope") {
-		offer := brief.Content.PrototypeOffer
+	if offer.Ready || offer.Summary != "" || len(offer.Included)+len(offer.Excluded)+len(offer.Services)+len(offer.Telemetry)+len(offer.GrafanaResources) > 0 {
 		result.PrototypeOffer = &offer
 	}
-	if all || wants("accept", "approve", "ready", "confirm") {
-		acceptance := brief.Content.Acceptance
+	if acceptance.Accepted || acceptance.Evidence != "" || acceptance.Evaluation.Result != "" {
 		result.Acceptance = &acceptance
 	}
 	return result
@@ -430,52 +606,6 @@ func bounded(value string, limit int) string {
 		return string(characters)
 	}
 	return string(characters[:limit])
-}
-
-func focusedDependency(focus, candidate string) bool {
-	if candidate == focus || strings.HasPrefix(candidate, focus+".") {
-		return true
-	}
-	category := strings.Split(focus, ".")[0]
-	allowed := map[string][]string{
-		"telemetry":         {"scenario", "journey", "services"},
-		"services":          {"scenario", "journey"},
-		"grafana_resources": {"audience", "outcome", "scenario", "proof_points", "telemetry"},
-		"narrative":         {"audience", "outcome", "stakes", "scenario", "journey", "proof_points"},
-		"architecture":      {"scenario", "services", "telemetry"},
-	}
-	for _, prefix := range allowed[category] {
-		if candidate == prefix || strings.HasPrefix(candidate, prefix+".") {
-			return true
-		}
-	}
-	return false
-}
-
-func factMatchesFocus(focus string, fact Fact) bool {
-	if fact.Topic == focus {
-		return true
-	}
-	if fact.Name == "" {
-		return false
-	}
-	return fact.Topic+"."+topicKey(fact.Name) == focus
-}
-
-func topicKey(label string) string {
-	key := strings.ToLower(strings.TrimSpace(label))
-	replacer := strings.NewReplacer(":", ".", " / ", ".", "/", ".")
-	key = replacer.Replace(key)
-	segments := strings.Split(key, ".")
-	normalized := make([]string, 0, len(segments))
-	for _, segment := range segments {
-		segment = strings.ReplaceAll(segment, "-", " ")
-		segment = strings.Join(strings.Fields(segment), "_")
-		if segment != "" {
-			normalized = append(normalized, segment)
-		}
-	}
-	return strings.Join(normalized, ".")
 }
 
 func filterFacts(facts []Fact, keep func(Fact) bool) []Fact {
@@ -505,18 +635,131 @@ func removeFacts(facts, excluded []Fact) []Fact {
 func factTopics(facts []Fact) []string {
 	topics := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		topics = append(topics, fact.Topic)
+		topics = append(topics, fact.TopicID)
 	}
 	return uniqueSorted(topics)
 }
 
-func manifest(role Role, briefVersion, messageCount int, topics []string, operational bool, payload any) Manifest {
-	encoded, _ := json.Marshal(payload)
-	return Manifest{
-		SchemaVersion: SchemaVersion, Role: role, BriefVersion: briefVersion,
-		IncludedMessageCount: messageCount, IncludedTopicKeys: uniqueSorted(topics),
-		IncludesOperationalState: operational, ApproximateCharacters: len(encoded),
+type budgetSection struct {
+	name     string
+	required bool
+	priority int
+	bytes    int
+	present  bool
+	topics   []string
+	drop     func()
+}
+
+func section(name string, required bool, priority int, value any, topics []string, drop func()) budgetSection {
+	encoded, _ := json.Marshal(value)
+	present := required || !emptyJSON(encoded)
+	return budgetSection{
+		name: name, required: required, priority: priority, bytes: len(encoded), present: present,
+		topics: uniqueSorted(topics), drop: drop,
 	}
+}
+
+func emptyJSON(encoded []byte) bool {
+	value := string(encoded)
+	return value == "null" || value == "[]" || value == "{}" || value == `""`
+}
+
+func (c Compiler) manifest(role Role, briefVersion, messageCount int, operational bool, sections []budgetSection) (Manifest, error) {
+	fixed := c.config.FixedTokens + c.config.SafetyMarginTokens + c.config.ProviderOverheadTokens
+	requiredTokens := fixed
+	for _, candidate := range sections {
+		if candidate.required {
+			requiredTokens += c.estimate(candidate.bytes)
+		}
+	}
+	if requiredTokens > c.config.MaxInputTokens {
+		return Manifest{}, &BudgetOverflowError{Role: role, RequiredTokens: requiredTokens, MaxInputTokens: c.config.MaxInputTokens}
+	}
+
+	optional := make([]budgetSection, 0, len(sections))
+	for _, candidate := range sections {
+		if !candidate.required && candidate.present {
+			optional = append(optional, candidate)
+		}
+	}
+	sort.SliceStable(optional, func(i, j int) bool {
+		if optional[i].priority == optional[j].priority {
+			return optional[i].name < optional[j].name
+		}
+		return optional[i].priority > optional[j].priority
+	})
+
+	includedOptional := make(map[string]bool, len(optional))
+	total := requiredTokens
+	for _, candidate := range optional {
+		tokens := c.estimate(candidate.bytes)
+		if total+tokens <= c.config.MaxInputTokens {
+			includedOptional[candidate.name] = true
+			total += tokens
+		}
+	}
+
+	manifest := Manifest{
+		SchemaVersion: SchemaVersion, Role: role, BriefVersion: briefVersion,
+		IncludesOperationalState: operational,
+		EstimatedTokens:          total, MaxInputTokens: c.config.MaxInputTokens,
+		FixedTokens: c.config.FixedTokens, SafetyMarginTokens: c.config.SafetyMarginTokens,
+		ProviderOverheadTokens: c.config.ProviderOverheadTokens,
+		Estimator:              fmt.Sprintf("utf8-bytes/%d-ceil", c.config.BytesPerToken),
+	}
+	for _, candidate := range sections {
+		if !candidate.present {
+			continue
+		}
+		decision := SectionDecision{
+			Name: candidate.name, Required: candidate.required, Priority: candidate.priority,
+			EstimatedTokens: c.estimate(candidate.bytes),
+		}
+		if candidate.required || includedOptional[candidate.name] {
+			manifest.IncludedSections = append(manifest.IncludedSections, decision)
+			manifest.ApproximateCharacters += candidate.bytes
+			manifest.IncludedTopicKeys = append(manifest.IncludedTopicKeys, candidate.topics...)
+			continue
+		}
+		decision.Reason = "context budget exhausted"
+		manifest.DroppedSections = append(manifest.DroppedSections, decision)
+		manifest.Truncated = true
+		if candidate.drop != nil {
+			candidate.drop()
+		}
+	}
+	manifest.IncludedTopicKeys = uniqueSorted(manifest.IncludedTopicKeys)
+	manifest.IncludedMessageCount = includedMessageCount(role, messageCount, manifest.DroppedSections)
+	if operational && sectionWasDropped(manifest.DroppedSections, "operational_state") {
+		manifest.IncludesOperationalState = false
+	}
+	return manifest, nil
+}
+
+func (c Compiler) estimate(bytes int) int {
+	if bytes <= 0 {
+		return 0
+	}
+	return (bytes + c.config.BytesPerToken - 1) / c.config.BytesPerToken
+}
+
+func includedMessageCount(role Role, original int, dropped []SectionDecision) int {
+	for _, decision := range dropped {
+		if (role == RoleCollaborator && decision.Name == "recent_messages") ||
+			(role == RoleFocused && decision.Name == "focused_messages") {
+			return boolCount(role == RoleCollaborator && original > 0)
+		}
+	}
+	return original
+}
+
+func sectionWasDropped(sections []SectionDecision, name string) bool {
+	for _, candidate := range sections {
+		if candidate.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func uniqueSorted(values []string) []string {
@@ -537,6 +780,13 @@ func uniqueSorted(values []string) []string {
 
 func cloneMessages(messages []domain.Message) []domain.Message {
 	return append([]domain.Message(nil), messages...)
+}
+
+func tailMessages(messages []domain.Message, limit int) []domain.Message {
+	if len(messages) <= limit {
+		return cloneMessages(messages)
+	}
+	return cloneMessages(messages[len(messages)-limit:])
 }
 
 func cloneBriefContent(brief *domain.LivingBrief) *domain.BriefContent {

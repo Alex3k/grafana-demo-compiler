@@ -1,5 +1,13 @@
 export type SessionState = "Draft" | "Ready" | "Generated" | "Running" | "Verified";
 
+export interface ContextUsage {
+  role: string;
+  estimatedTokens: number;
+  maxInputTokens: number;
+  truncated: boolean;
+  updatedAt: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -59,12 +67,14 @@ export interface PrototypeIteration {
 export type BriefStatus = "unknown" | "proposed" | "confirmed";
 
 export interface BriefItem {
+  id: string;
   name: string;
   value: string;
   status: BriefStatus;
 }
 
 export interface BriefFocus {
+  topicId: string;
   label: string;
   value: string;
   status: BriefStatus;

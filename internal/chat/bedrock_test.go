@@ -14,7 +14,12 @@ import (
 
 func TestRoleContextAssociatesInternalAgentsWithSessionConversation(t *testing.T) {
 	session := domain.Session{ID: "session-123", Title: "Camera fleet demo"}
-	manifest := contextengine.Manifest{SchemaVersion: contextengine.SchemaVersion, Role: contextengine.RoleBuilder, IncludedMessageCount: 2}
+	manifest := contextengine.Manifest{
+		SchemaVersion: contextengine.SchemaVersion, Role: contextengine.RoleBuilder, BriefVersion: 3,
+		IncludedMessageCount: 2, EstimatedTokens: 1200, MaxInputTokens: 32000,
+		IncludedSections: []contextengine.SectionDecision{{Name: "implementation_plan"}},
+		DroppedSections:  []contextengine.SectionDecision{{Name: "latest_prototype"}}, Truncated: true,
+	}
 	ctx, _ := roleContext(context.Background(), session, roleBuilder, manifest)
 
 	if got, ok := agento11y.ConversationIDFromContext(ctx); !ok || got != session.ID {
@@ -30,11 +35,68 @@ func TestRoleContextAssociatesInternalAgentsWithSessionConversation(t *testing.T
 	if got := info.Metadata["context.message_count"]; got != 2 {
 		t.Fatalf("context message count = %#v", got)
 	}
+	if got := info.Metadata["context.brief_version"]; got != 3 {
+		t.Fatalf("context brief version = %#v", got)
+	}
+	if got := info.Metadata["context.estimated_tokens"]; got != 1200 {
+		t.Fatalf("context estimated tokens = %#v", got)
+	}
+	if got := info.Metadata["context.truncated"]; got != true {
+		t.Fatalf("context truncated = %#v", got)
+	}
+	if got := info.Metadata["context.included_sections"]; len(got.([]string)) != 1 || got.([]string)[0] != "implementation_plan" {
+		t.Fatalf("context included sections = %#v", got)
+	}
 	if _, found := info.Tags["context.message_count"]; found {
 		t.Fatal("dynamic context count must not be exported as a metric tag")
 	}
 	if got, ok := observability.ContextManifestFromContext(ctx); !ok || got.Role != contextengine.RoleBuilder {
 		t.Fatalf("context manifest = %#v, %t", got, ok)
+	}
+}
+
+func TestContextConfigFromEnvUsesOverridesAndSafeDefaults(t *testing.T) {
+	t.Setenv("DEMO_COMPILER_CONTEXT_MAX_INPUT_TOKENS", "12000")
+	t.Setenv("DEMO_COMPILER_CONTEXT_BYTES_PER_TOKEN", "invalid")
+
+	config := contextConfigFromEnv()
+	if config.MaxInputTokens != 12000 || config.BytesPerToken != contextengine.DefaultConfig().BytesPerToken {
+		t.Fatalf("context config = %#v", config)
+	}
+}
+
+func TestCuratorPacketConsumesOnlyLargestChronologicalBatchThatFits(t *testing.T) {
+	config := contextengine.DefaultConfig()
+	config.MaxInputTokens = 15000
+	service := &Service{contextConfig: config}
+	messages := []domain.Message{
+		{ID: "first", Role: "user", Kind: "message", Status: "complete", Content: strings.Repeat("a", 6000)},
+		{ID: "second", Role: "assistant", Kind: "message", Status: "complete", Content: strings.Repeat("b", 6000)},
+	}
+
+	packet, consumed, err := service.curatorPacket(domain.Session{}, messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed != "first" || len(packet.DeltaMessages) != 1 || packet.DeltaMessages[0].ID != "first" {
+		t.Fatalf("curator batch consumed %q with messages %#v", consumed, packet.DeltaMessages)
+	}
+}
+
+func TestCuratorPacketReturnsOverflowWhenOldestMessageCannotFit(t *testing.T) {
+	config := contextengine.DefaultConfig()
+	config.MaxInputTokens = 13000
+	service := &Service{contextConfig: config}
+	messages := []domain.Message{{
+		ID: "oversized", Role: "user", Kind: "message", Status: "complete", Content: strings.Repeat("x", 6000),
+	}}
+
+	packet, consumed, err := service.curatorPacket(domain.Session{}, messages)
+	if !contextengine.IsBudgetOverflow(err) {
+		t.Fatalf("curatorPacket() error = %v", err)
+	}
+	if consumed != "" || len(packet.DeltaMessages) != 0 {
+		t.Fatalf("overflow consumed %q with packet %#v", consumed, packet)
 	}
 }
 
@@ -94,10 +156,10 @@ func TestFocusedContextKeepsOnlyCompiledTopicContext(t *testing.T) {
 
 func TestPreserveConfirmedBriefPreventsMainChatDowngrade(t *testing.T) {
 	current := domain.BriefContent{
-		Telemetry: []domain.BriefItem{{Name: "Logs", Value: "Structured logfmt events", Status: "confirmed"}},
+		Telemetry: []domain.BriefItem{{ID: "tel_logs", Name: "Logs", Value: "Structured logfmt events", Status: "confirmed"}},
 	}
 	candidate := domain.BriefContent{
-		Telemetry: []domain.BriefItem{{Name: "Logs", Value: "JSON events", Status: "proposed"}},
+		Telemetry: []domain.BriefItem{{ID: "tel_logs", Name: "Journal entries", Value: "JSON events", Status: "proposed"}},
 	}
 
 	got := preserveConfirmedBrief(current, candidate)
@@ -108,7 +170,7 @@ func TestPreserveConfirmedBriefPreventsMainChatDowngrade(t *testing.T) {
 
 func TestPreserveConfirmedBriefRestoresOmittedTopic(t *testing.T) {
 	current := domain.BriefContent{
-		GrafanaResources: []domain.BriefItem{{Name: "Fleet overview", Value: "Device health dashboard", Status: "confirmed"}},
+		GrafanaResources: []domain.BriefItem{{ID: "graf_fleet", Name: "Fleet overview", Value: "Device health dashboard", Status: "confirmed"}},
 	}
 
 	got := preserveConfirmedBrief(current, domain.BriefContent{})
@@ -151,7 +213,10 @@ func TestCompiledCollaboratorContextOmitsSensitiveOperationalDetails(t *testing.
 		}},
 	}
 
-	packet := contextengine.New(6).Collaborator(session)
+	packet, err := contextengine.New(6).Collaborator(session)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := collaboratorContext(packet)
 	for _, expected := range []string{
 		`"sessionState":"Running"`, `"number":8`, `"stackSlug":"camera-demo"`,

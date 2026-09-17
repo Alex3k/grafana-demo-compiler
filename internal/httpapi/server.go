@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/application"
@@ -26,6 +28,7 @@ type Server struct {
 	o11y       *observability.Runtime
 	log        *slog.Logger
 	web        fs.FS
+	mutationMu sync.RWMutex
 }
 
 func New(
@@ -44,11 +47,23 @@ func New(
 		prototype: prototypeFlow, deployment: deploymentFlow, o11y: o11y, log: logger, web: web,
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/sessions/{id}/revisions", server.listRevisions)
+	mux.HandleFunc("POST /api/sessions/{id}/revisions/{revisionID}", server.decideRevision)
+	if chatService != nil {
+		chatService.SetGCXStore(dataStore)
+	}
+	mux.HandleFunc("GET /api/sessions/{id}/gcx-actions", server.listGCXActions)
+	mux.HandleFunc("POST /api/sessions/{id}/gcx-actions/{actionID}", server.decideGCXAction)
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /api/sessions", server.listSessions)
 	mux.HandleFunc("POST /api/sessions", server.createSession)
 	mux.HandleFunc("GET /api/sessions/{id}", server.getSession)
+	mux.HandleFunc("GET /api/sessions/{id}/context-usage", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, map[string]any{"usage": server.chat.ContextUsage(r.PathValue("id"))})
+	})
 	mux.HandleFunc("PATCH /api/sessions/{id}", server.renameSession)
+	mux.HandleFunc("DELETE /api/sessions/{id}", server.deleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/messages", server.createMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/prototypes", server.createPrototype)
 	mux.HandleFunc("POST /api/sessions/{id}/deployments", server.createDeployment)
@@ -62,7 +77,59 @@ func New(
 	if web != nil {
 		mux.Handle("/", spaHandler(web))
 	}
-	return recoverMiddleware(logger, requestLogMiddleware(logger, mux))
+	return recoverMiddleware(logger, requestLogMiddleware(logger, server.sessionMutationGate(mux)))
+}
+
+func (s *Server) sessionMutationGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sessions/") {
+			if r.Method == http.MethodDelete {
+				s.mutationMu.Lock()
+				defer s.mutationMu.Unlock()
+			} else {
+				s.mutationMu.RLock()
+				defer s.mutationMu.RUnlock()
+				id := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/")[0]
+				deleting, err := s.store.SessionDeleting(r.Context(), id)
+				if err != nil {
+					s.writeError(w, 500, "Could not check session", err)
+					return
+				}
+				if deleting {
+					writeJSON(w, 409, map[string]string{"error": "Session cleanup is pending. Retry deleting the session."})
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := decodeJSON(r, &input); err != nil || !input.Confirm {
+		writeJSON(w, 400, map[string]string{"error": "Explicit confirmation is required to permanently delete the session and its resources"})
+		return
+	}
+	if s.deployment == nil {
+		writeJSON(w, 503, map[string]string{"error": "Cleanup is unavailable"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	err := s.deployment.DeleteSession(ctx, s.store, r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		s.log.Error("session deletion failed", "error", err)
+		writeJSON(w, 409, map[string]string{"error": "Cleanup did not complete. Wait for active work to finish and check gcx Cloud authentication and Docker, then retry deletion. The session remains available; some resources may already have been removed."})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

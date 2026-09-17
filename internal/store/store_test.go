@@ -3,12 +3,81 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
+	_ "modernc.org/sqlite"
 )
+
+func TestMigrationBackfillsStableTopicIDs(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := domain.BriefContent{Telemetry: []domain.BriefItem{{Name: "Logs", Value: "logfmt", Status: "proposed"}}}
+	payload, _ := json.Marshal(legacy)
+	statements := []string{
+		`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`CREATE TABLE living_briefs (session_id TEXT NOT NULL, version INTEGER NOT NULL, content TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (session_id, version))`,
+		`CREATE TABLE brief_threads (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, label TEXT NOT NULL, value TEXT NOT NULL, status TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+		`INSERT INTO sessions VALUES ('session', 'Legacy', 'Draft', '2026-09-17T12:00:00Z', '2026-09-17T12:00:00Z')`,
+		`INSERT INTO living_briefs VALUES ('session', 1, '` + string(payload) + `', '2026-09-17T12:00:00Z')`,
+		`INSERT INTO brief_threads VALUES ('thread', 'session', 'Telemetry: Logs', 'logfmt', 'proposed', 'draft', '2026-09-17T12:00:00Z', '2026-09-17T12:00:00Z')`,
+	}
+	for _, statement := range statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	brief, err := s.GetBrief(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := brief.Content.Telemetry[0].ID
+	if id == "" {
+		t.Fatal("legacy collection item did not receive an ID")
+	}
+	thread, err := s.GetBriefThread(ctx, "session", "thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thread.Focus.TopicID != id {
+		t.Fatalf("thread topic ID = %q, want %q", thread.Focus.TopicID, id)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief, err = s.GetBrief(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thread, err = s.GetBriefThread(ctx, "session", "thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.Content.Telemetry[0].ID != id || thread.Focus.TopicID != id {
+		t.Fatalf("topic IDs changed after reopening: brief=%q thread=%q want=%q", brief.Content.Telemetry[0].ID, thread.Focus.TopicID, id)
+	}
+}
 
 func TestLivingBriefCursorSelectsOnlyNewMessages(t *testing.T) {
 	ctx := context.Background()
@@ -56,14 +125,14 @@ func TestLivingBriefCursorSelectsOnlyNewMessages(t *testing.T) {
 		t.Fatalf("new messages = %#v, want only %q", newMessages, messages[2].ID)
 	}
 
-	thread, err := dataStore.OpenBriefThread(ctx, session.ID, domain.BriefFocus{Label: "Telemetry: Logs", Value: "JSON", Status: "proposed"})
+	thread, err := dataStore.OpenBriefThread(ctx, session.ID, domain.BriefFocus{TopicID: "tel_logs", Label: "Telemetry: Logs", Value: "JSON", Status: "proposed"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := dataStore.UpdateBriefThreadCandidate(ctx, session.ID, thread.ID, "logfmt"); err != nil {
 		t.Fatal(err)
 	}
-	confirmed, err := dataStore.ApplyBriefThread(ctx, session.ID, thread.ID, domain.BriefContent{Telemetry: []domain.BriefItem{{Name: "Logs", Value: "logfmt", Status: "confirmed"}}})
+	confirmed, err := dataStore.ApplyBriefThread(ctx, session.ID, thread.ID, domain.BriefContent{Telemetry: []domain.BriefItem{{ID: "tel_logs", Name: "Logs", Value: "logfmt", Status: "confirmed"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +316,7 @@ func TestBriefThreadPersistsOutsideMainConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thread, err := dataStore.OpenBriefThread(ctx, session.ID, domain.BriefFocus{Label: "Telemetry: Structured logs", Value: "Plain-text logs", Status: "proposed"})
+	thread, err := dataStore.OpenBriefThread(ctx, session.ID, domain.BriefFocus{TopicID: "tel_logs", Label: "Telemetry: Structured logs", Value: "Plain-text logs", Status: "proposed"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +341,7 @@ func TestBriefThreadPersistsOutsideMainConversation(t *testing.T) {
 	if err := dataStore.UpdateBriefThreadCandidate(ctx, session.ID, thread.ID, "Structured JSON logs"); err != nil {
 		t.Fatal(err)
 	}
-	brief, err := dataStore.ApplyBriefThread(ctx, session.ID, thread.ID, domain.BriefContent{Telemetry: []domain.BriefItem{{Name: "Logs", Value: "Structured JSON logs", Status: "confirmed"}}})
+	brief, err := dataStore.ApplyBriefThread(ctx, session.ID, thread.ID, domain.BriefContent{Telemetry: []domain.BriefItem{{ID: "tel_logs", Name: "Logs", Value: "Structured JSON logs", Status: "confirmed"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,15 +4,16 @@ import (
 	"testing"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/application"
+	"github.com/Alex3k/grafana-demo-compiler/internal/brieftopics"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 )
 
 func TestApplyBriefTopic(t *testing.T) {
 	content := domain.BriefContent{
-		Scenario:  domain.BriefItem{Name: "Scenario", Value: "Camera outage", Status: "proposed"},
-		Telemetry: []domain.BriefItem{{Name: "Structured logs", Value: "Firmware events", Status: "proposed"}},
+		Scenario:  domain.BriefItem{ID: "scenario", Name: "Scenario", Value: "Camera outage", Status: "proposed"},
+		Telemetry: []domain.BriefItem{{ID: "tel_logs", Name: "Structured logs", Value: "Firmware events", Status: "proposed"}},
 	}
-	if !application.ApplyBriefTopic(&content, "Telemetry: Structured logs", "Structured JSON firmware events") {
+	if !brieftopics.Apply(&content, "tel_logs", "Structured JSON firmware events") {
 		t.Fatal("telemetry topic was not matched")
 	}
 	if content.Telemetry[0].Status != "confirmed" {
@@ -21,7 +22,7 @@ func TestApplyBriefTopic(t *testing.T) {
 	if content.Telemetry[0].Value != "Structured JSON firmware events" {
 		t.Fatalf("telemetry value = %q", content.Telemetry[0].Value)
 	}
-	if !application.ApplyBriefTopic(&content, "Scenario", "Camera config outage") || content.Scenario.Status != "confirmed" || content.Scenario.Value != "Camera config outage" {
+	if !brieftopics.Apply(&content, "scenario", "Camera config outage") || content.Scenario.Status != "confirmed" || content.Scenario.Value != "Camera config outage" {
 		t.Fatal("core scenario topic was not confirmed")
 	}
 }

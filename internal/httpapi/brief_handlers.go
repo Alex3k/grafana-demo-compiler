@@ -4,18 +4,17 @@ import (
 	"net/http"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/application"
-	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 )
 
 func (s *Server) openBriefThread(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Focus domain.BriefFocus `json:"focus"`
+		TopicID string `json:"topicId"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid brief thread request", err)
 		return
 	}
-	thread, err := s.briefFlow.OpenThread(r.Context(), r.PathValue("id"), input.Focus)
+	thread, err := s.briefFlow.OpenThread(r.Context(), r.PathValue("id"), input.TopicID)
 	if err != nil {
 		s.writeFault(w, err)
 		return

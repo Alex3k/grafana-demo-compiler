@@ -122,9 +122,27 @@ and at most six recent messages. The brief curator receives only messages added
 since the previous brief version. Focused chats receive their selected topic,
 confirmed constraints, direct dependencies, and their isolated thread. The
 prototype builder receives the planner's implementation contract rather than
-the human conversation or living brief. Each generation records a content-free
-context manifest in Agent Observability with the schema version, brief version,
-message count, topic keys, and approximate context size.
+the human conversation or living brief. Brief topics use application-owned IDs;
+labels are display text and are never used for runtime routing. Each generation
+records a content-free context manifest in Agent Observability with the schema
+version, brief version, included and dropped sections, topic IDs, estimated
+tokens, and the configured budget.
+
+Context is budgeted conservatively using UTF-8 bytes per token. Required facts
+fail explicitly if they cannot fit; optional sections are included by
+role-specific priority and dropped as whole sections rather than being silently
+clipped. Focused chats protect the latest user request and fit older messages
+individually, newest first within the history window, presenting the retained
+messages chronologically. The curator processes the largest chronological message batch that fits
+and advances its cursor only through that batch. The builder checks the growing
+tool transcript before every model step.
+
+The session sidebar shows estimated context usage for the latest request from
+each activity. The meter compares the estimate (including reserved overhead)
+with the configured input budget, warns at 80% and 95%, and identifies requests
+where optional context was trimmed. Builder usage updates before every model
+step as its tool transcript grows. These snapshots reset when the server
+restarts; they are not a cumulative conversation size or an exact tokenizer count.
 
 ### Model choice
 
@@ -234,6 +252,19 @@ BEDROCK_MODEL_ID=your-model-or-inference-profile
 
 The Grafana AI SDK uses the standard AWS credential chain. Changing the model
 requires updating `BEDROCK_MODEL_ID` and restarting the compiler.
+
+The context budget can be tuned without code changes:
+
+```bash
+DEMO_COMPILER_CONTEXT_MAX_INPUT_TOKENS=32000
+DEMO_COMPILER_CONTEXT_SAFETY_TOKENS=1500
+DEMO_COMPILER_CONTEXT_PROVIDER_OVERHEAD_TOKENS=1000
+DEMO_COMPILER_CONTEXT_BYTES_PER_TOKEN=3
+```
+
+The byte estimator intentionally errs on the conservative side. These settings
+reserve room for system prompts, provider formatting, tool schemas, and model
+output rather than trying to reproduce a model-specific tokenizer.
 
 ### Agent Observability configuration
 

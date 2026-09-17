@@ -4,20 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/brieftopics"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 )
-
-func TestValidateBriefFocusNormalizesInput(t *testing.T) {
-	t.Parallel()
-
-	focus := domain.BriefFocus{Label: " Telemetry: Logs ", Value: " JSON logs ", Status: "proposed"}
-	if err := ValidateBriefFocus(&focus); err != nil {
-		t.Fatalf("ValidateBriefFocus() error = %v", err)
-	}
-	if focus.Label != "Telemetry: Logs" || focus.Value != "JSON logs" {
-		t.Fatalf("ValidateBriefFocus() = %#v", focus)
-	}
-}
 
 func TestFocusedCandidateUsesLastHeading(t *testing.T) {
 	t.Parallel()
@@ -39,23 +28,23 @@ func TestApplyBriefTopic(t *testing.T) {
 	t.Parallel()
 
 	content := domain.BriefContent{
-		Audience:  domain.BriefItem{Value: "SREs", Status: "proposed"},
-		Telemetry: []domain.BriefItem{{Name: "Logs", Value: "logfmt", Status: "proposed"}},
+		Audience:  domain.BriefItem{ID: "audience", Value: "SREs", Status: "proposed"},
+		Telemetry: []domain.BriefItem{{ID: "tel_logs", Name: "Logs", Value: "logfmt", Status: "proposed"}},
 	}
-	if !ApplyBriefTopic(&content, "Audience", "Platform engineers") {
+	if !brieftopics.Apply(&content, "audience", "Platform engineers") {
 		t.Fatal("ApplyBriefTopic() did not recognize core topic")
 	}
 	if content.Audience.Value != "Platform engineers" || content.Audience.Status != "confirmed" {
 		t.Fatalf("Audience = %#v", content.Audience)
 	}
-	if !ApplyBriefTopic(&content, "Telemetry: logs", "JSON") {
-		t.Fatal("ApplyBriefTopic() did not recognize collection topic case-insensitively")
+	if !brieftopics.Apply(&content, "tel_logs", "JSON") {
+		t.Fatal("Apply() did not recognize collection topic ID")
 	}
 	if content.Telemetry[0].Value != "JSON" || content.Telemetry[0].Status != "confirmed" {
 		t.Fatalf("Telemetry[0] = %#v", content.Telemetry[0])
 	}
-	if ApplyBriefTopic(&content, "Unknown", "value") {
-		t.Fatal("ApplyBriefTopic() accepted an unknown topic")
+	if brieftopics.Apply(&content, "unknown", "value") {
+		t.Fatal("Apply() accepted an unknown topic")
 	}
 }
 

@@ -1,4 +1,4 @@
-import type { BriefFocus, BriefThread, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
+import type { BriefThread, ContextUsage, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -17,6 +17,8 @@ export const api = {
   health: () => json<Health>("/api/health"),
   sessions: () => json<Session[]>("/api/sessions"),
   session: (id: string) => json<Session>(`/api/sessions/${id}`),
+  contextUsage: (id: string, signal: AbortSignal) => json<{ usage: ContextUsage[] }>(`/api/sessions/${id}/context-usage`, { signal }),
+  deleteSession: (id: string) => json<void>(`/api/sessions/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
   createSession: () =>
     json<Session>("/api/sessions", { method: "POST", body: JSON.stringify({}) }),
   renameSession: (id: string, title: string) =>
@@ -24,10 +26,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ title }),
     }),
-  openBriefThread: (sessionId: string, focus: BriefFocus) =>
+  openBriefThread: (sessionId: string, topicId: string) =>
     json<BriefThread>(`/api/sessions/${sessionId}/brief-threads`, {
       method: "POST",
-      body: JSON.stringify({ focus }),
+      body: JSON.stringify({ topicId }),
     }),
   confirmBriefThread: (sessionId: string, threadId: string) =>
     json<{ thread: BriefThread; brief: LivingBrief; activity: Message }>(`/api/sessions/${sessionId}/brief-threads/${threadId}/confirm`, {

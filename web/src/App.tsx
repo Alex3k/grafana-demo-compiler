@@ -2,8 +2,10 @@ import { FormEvent, useEffect, useId, useRef, useState } from "react";
 import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { GrafanaActions } from "./GrafanaActions";
+import { PrototypeRevisions } from "./PrototypeRevisions";
 import { api, streamBriefThreadMessage, streamMessage } from "./api";
-import type { BriefFocus, BriefItem, BriefThread, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefItem, BriefThread, ContextUsage, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
@@ -21,6 +23,9 @@ interface QueuedMessage {
 
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<Session | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [active, setActive] = useState<Session | null>(null);
   const [health, setHealth] = useState<Health>(EMPTY_HEALTH);
   const [focused, setFocused] = useState(() => localStorage.getItem("layout") === "focused");
@@ -127,6 +132,22 @@ function App() {
     setSessions(items);
   }
 
+  async function deleteSession() {
+    if (!deleteTarget || deleting) return;
+    const id = deleteTarget.id;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api.deleteSession(id);
+      setMessageQueues((current) => { const next = { ...current }; delete next[id]; return next; });
+      setSessions((current) => current.filter((session) => session.id !== id));
+      if (active?.id === id) { setActive(null); setTopicThread(null); }
+      setDeleteTarget(null);
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : "Deletion failed. Retry to finish cleanup.");
+    } finally { setDeleting(false); }
+  }
+
   async function selectSession(session: Session) {
     setError("");
     stickToBottomRef.current = true;
@@ -181,7 +202,7 @@ function App() {
     if (!active) return;
     setTopicError("");
     try {
-      setTopicThread(await api.openBriefThread(active.id, focus));
+      setTopicThread(await api.openBriefThread(active.id, focus.topicId));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The focused chat could not be opened.");
     }
@@ -338,6 +359,7 @@ function App() {
           onNew={() => void newSession()}
           onSelect={(session) => void selectSession(session)}
           onClose={() => setSidebarOpen(false)}
+          onDelete={(session) => { setDeleteError(""); setDeleteTarget(session); }}
         />
         <main className="workspace">
           {active ? (
@@ -366,12 +388,14 @@ function App() {
           )}
         </main>
         <ContextRail
+          key={active?.id ?? "no-session"}
           open={railOpen}
           session={active}
           health={health}
           onClose={() => setRailOpen(false)}
           onFocusTopic={(focus) => void openTopic(focus)}
           prototypeBusy={prototypeBusy}
+          onRevisionStarted={(iteration) => setActive(current => current?.id === iteration.sessionId ? { ...current, prototypes: [iteration, ...(current.prototypes ?? []).filter(p => p.id !== iteration.id)] } : current)}
           prototypeProgress={prototypeActivity[prototypeActivity.length - 1] ?? ""}
           onBuildPrototype={() => void buildPrototype()}
           onDeployLocal={(region) => void deployLocal(region)}
@@ -389,6 +413,30 @@ function App() {
           />
         )}
       </div>
+      {deleteTarget && <div className="architecture-overlay">
+        <section className="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description" onKeyDown={(event) => {
+          if (event.key === "Escape" && !deleting) setDeleteTarget(null);
+          if (event.key === "Tab") {
+            const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+            const first = buttons[0], last = buttons[buttons.length - 1];
+            if (!first) { event.preventDefault(); return; }
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+          }
+        }}>
+          <h2 id="delete-title">Delete this demo permanently?</h2>
+          <p><strong>{deleteTarget.title}</strong></p>
+          <div id="delete-description"><p>This will delete:</p><ul>
+            <li>The session, all chats, brief revisions and build history</li>
+            <li>Generated files, including local configuration and credentials</li>
+            <li>This demo’s local Docker containers, networks and data volumes</li>
+            <li>Its dedicated Grafana Cloud stack, including dashboards, alerts and telemetry</li>
+          </ul><p>This cannot be undone. The central operations stack is preserved.</p></div>
+          {deleteError && <p role="alert">{deleteError}</p>}
+          {deleting && <p role="status">Deleting local and Cloud resources… This may take a few minutes.</p>}
+          <div className="delete-actions"><button autoFocus disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</button><button className="delete-confirm" disabled={deleting} onClick={() => void deleteSession()}>{deleting ? "Deleting…" : "Delete everything"}</button></div>
+        </section>
+      </div>}
     </div>
   );
 }
@@ -418,7 +466,7 @@ function TopBar({ focused, onToggleLayout, onOpenSessions, onOpenContext }: { fo
   );
 }
 
-function SessionSidebar({ open, sessions, activeId, onNew, onSelect, onClose }: { open: boolean; sessions: Session[]; activeId?: string; onNew: () => void; onSelect: (session: Session) => void; onClose: () => void }) {
+function SessionSidebar({ open, sessions, activeId, onNew, onSelect, onClose, onDelete }: { open: boolean; sessions: Session[]; activeId?: string; onNew: () => void; onSelect: (session: Session) => void; onClose: () => void; onDelete: (session: Session) => void }) {
   return (
     <aside className={`sidebar ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Demo sessions</strong><button onClick={onClose}>×</button></div>
@@ -426,10 +474,10 @@ function SessionSidebar({ open, sessions, activeId, onNew, onSelect, onClose }: 
       <div className="section-label">Recent sessions</div>
       <nav className="session-list">
         {sessions.map((session) => (
-          <button key={session.id} className={`session-item ${session.id === activeId ? "active" : ""}`} onClick={() => onSelect(session)}>
+          <div className="session-row" key={session.id}><button className={`session-item ${session.id === activeId ? "active" : ""}`} onClick={() => onSelect(session)}>
             <span className="session-title">{session.title}</span>
             <span className="session-meta"><span className={`state-dot state-${session.state.toLowerCase()}`} />{session.state}<span>{relativeTime(session.updatedAt)}</span></span>
-          </button>
+          </button><button className="session-delete" aria-label={`Delete ${session.title}`} title="Delete session" onClick={() => onDelete(session)}>×</button></div>
         ))}
         {!sessions.length && <p className="empty-copy">No demos yet.</p>}
       </nav>
@@ -569,14 +617,17 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
   );
 }
 
-function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => Promise<boolean> }) {
+function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken, onRevisionStarted }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => Promise<boolean>; onRevisionStarted: (iteration: PrototypeIteration) => void }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
       {session?.brief && <PrototypeCard offer={session.brief.content.prototypeOffer} iteration={session.prototypes?.[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />}
-      {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard key={session.id} session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
+      {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard key={`deployment:${session.id}`} session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
+      <ContextUsageCard key={`context-usage:${session?.id ?? "no-session"}`} sessionId={session?.id} />
+      {session && <GrafanaActions key={`grafana-actions:${session.id}`} sessionId={session.id} />}
+      {session && <PrototypeRevisions key={`revisions:${session.id}`} sessionId={session.id} onStarted={onRevisionStarted} />}
       <p className="eyebrow rail-section">LIVING BRIEF</p>
       {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
@@ -587,6 +638,67 @@ function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBu
   );
 }
 
+const CONTEXT_ROLE_LABELS: Record<string, string> = {
+  collaborator: "Collaborator",
+  "focused-topic": "Focused topic",
+  "brief-curator": "Brief curator",
+  "requirement-evaluator": "Requirement evaluator",
+  "prototype-planner": "Prototype planner",
+  "prototype-builder": "Prototype builder",
+};
+
+function ContextUsageCard({ sessionId }: { sessionId?: string }) {
+  const [usage, setUsage] = useState<ContextUsage[]>([]);
+  const [unavailable, setUnavailable] = useState(false);
+  const headingId = useId();
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const controller = new AbortController();
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await api.contextUsage(sessionId, controller.signal);
+        if (controller.signal.aborted) return;
+        setUsage(next.usage ?? []);
+        setUnavailable(false);
+      } catch {
+        if (controller.signal.aborted) return;
+        setUnavailable(true);
+      }
+      if (!controller.signal.aborted) timer = window.setTimeout(poll, 3000);
+    };
+    void poll();
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [sessionId]);
+
+  return (
+    <section className="context-usage-card" aria-labelledby={headingId}>
+      <h3 id={headingId}>Estimated context usage</h3>
+      <p>Configured input budget · latest request per activity</p>
+      {usage.map((item) => {
+        const label = CONTEXT_ROLE_LABELS[item.role] ?? item.role;
+        const percent = item.maxInputTokens > 0 ? item.estimatedTokens / item.maxInputTokens * 100 : 0;
+        const level = percent >= 95 ? "critical" : percent >= 80 ? "warning" : "normal";
+        const percentText = `${Math.round(percent)}%`;
+        const used = item.estimatedTokens.toLocaleString();
+        const limit = item.maxInputTokens.toLocaleString();
+        return (
+          <div className={`context-usage-item ${level}`} key={item.role}>
+            <div className="context-usage-label"><strong>{label}</strong><span>{percentText}</span></div>
+            <div className="context-usage-track" role="meter" aria-label={`${label} estimated context usage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, percent))} aria-valuetext={`${used} of ${limit} estimated tokens, ${percentText}${percent > 100 ? ", over configured input budget" : ""}`}>
+              <div style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} />
+            </div>
+            <small>{used} / {limit} tokens{percent > 100 ? " · over budget" : percent >= 80 ? " · nearing budget" : ""}{item.truncated ? " · input trimmed" : ""}</small>
+          </div>
+        );
+      })}
+      {!usage.length && !unavailable && <p className="context-usage-empty">Available after the next model request</p>}
+      {unavailable && <p className="context-usage-empty">{usage.length ? "Could not refresh usage; showing last estimate." : "Context usage temporarily unavailable."}</p>}
+    </section>
+  );
+}
+
 function Connection({ name, status, detail }: { name: string; status: string; detail: string }) {
   const healthy = status === "connected" || status === "configured";
   return <div className="connection"><span className={`status-dot ${healthy ? "good" : status === "error" ? "bad" : "warn"}`} /><div><strong>{name}</strong><small>{detail}</small></div></div>;
@@ -594,23 +706,23 @@ function Connection({ name, status, detail }: { name: string; status: string; de
 
 function BriefPanel({ brief, onFocusTopic }: { brief: LivingBrief; onFocusTopic: (focus: BriefFocus) => void }) {
   const content = brief.content;
-  const coreItems: Array<[string, BriefItem]> = [
-    ["Audience", content.audience],
-    ["Company", content.company],
-    ["Outcome", content.outcome],
-    ["Stakes", content.stakes],
-    ["Scenario", content.scenario],
-    ["Journey", content.journey],
+  const coreItems: Array<[string, string, BriefItem]> = [
+    ["audience", "Audience", content.audience],
+    ["company", "Company", content.company],
+    ["outcome", "Outcome", content.outcome],
+    ["stakes", "Stakes", content.stakes],
+    ["scenario", "Scenario", content.scenario],
+    ["journey", "Journey", content.journey],
   ];
   return (
     <div className="brief-panel">
       <div className="brief-version"><span>Version {brief.version}</span><span>{relativeTime(brief.updatedAt)}</span></div>
       {!!content.changes.length && <BriefSection title="Changed this turn"><ul>{content.changes.map((change) => <li key={change}>{change}</li>)}</ul></BriefSection>}
-      <div className="brief-core">{coreItems.map(([label, item]) => <BriefItemView key={label} label={label} item={item} onFocusTopic={onFocusTopic} />)}</div>
+      <div className="brief-core">{coreItems.map(([topicId, label, item]) => <BriefItemView key={topicId} topicId={topicId} label={label} item={item} onFocusTopic={onFocusTopic} />)}</div>
       <BriefItems title="Proof points" items={content.proofPoints} onFocusTopic={onFocusTopic} />
       <BriefItems title="Included scope" items={content.scope?.included} onFocusTopic={onFocusTopic} />
       <BriefItems title="Deliberately excluded" items={content.scope?.excluded} onFocusTopic={onFocusTopic} />
-      {content.scope?.simulationBoundary?.value && <BriefItemView label="Simulation boundary" item={content.scope.simulationBoundary} onFocusTopic={onFocusTopic} />}
+      {content.scope?.simulationBoundary?.value && <BriefItemView topicId="scope.simulation_boundary" label="Simulation boundary" item={content.scope.simulationBoundary} onFocusTopic={onFocusTopic} />}
       <BriefItems title="Services" items={content.services} onFocusTopic={onFocusTopic} />
       <BriefItems title="Telemetry" items={content.telemetry} onFocusTopic={onFocusTopic} />
       <BriefItems title="Grafana resources" items={content.grafanaResources} onFocusTopic={onFocusTopic} />
@@ -623,9 +735,9 @@ function BriefPanel({ brief, onFocusTopic }: { brief: LivingBrief; onFocusTopic:
   );
 }
 
-function BriefItemView({ label, item, onFocusTopic }: { label: string; item: BriefItem; onFocusTopic: (focus: BriefFocus) => void }) {
+function BriefItemView({ topicId, label, item, onFocusTopic }: { topicId: string; label: string; item: BriefItem; onFocusTopic: (focus: BriefFocus) => void }) {
   const focusable = item.status === "proposed" || item.status === "confirmed";
-  return <button type="button" className={`brief-item ${focusable ? "is-focusable" : ""}`} disabled={!focusable} onClick={() => focusable && onFocusTopic({ label, value: item.value, status: item.status })}><div><span>{label}</span><StatusPill status={item.status} /></div><p>{item.value || "Not understood yet"}</p>{focusable && <small>Discuss this topic →</small>}</button>;
+  return <button type="button" className={`brief-item ${focusable ? "is-focusable" : ""}`} disabled={!focusable} onClick={() => focusable && onFocusTopic({ topicId, label, value: item.value, status: item.status })}><div><span>{label}</span><StatusPill status={item.status} /></div><p>{item.value || "Not understood yet"}</p>{focusable && <small>Discuss this topic →</small>}</button>;
 }
 
 function BriefItems({ title, items, onFocusTopic }: { title: string; items?: BriefItem[] | null; onFocusTopic: (focus: BriefFocus) => void }) {
@@ -633,7 +745,7 @@ function BriefItems({ title, items, onFocusTopic }: { title: string; items?: Bri
   if (!visibleItems.length) return null;
   return <BriefSection title={`${title} · ${visibleItems.length}`}><ul className="brief-item-list">{visibleItems.map((item) => {
     const focusable = item.status === "proposed" || item.status === "confirmed";
-    return <li key={`${item.name}-${item.value}`}><button type="button" disabled={!focusable} onClick={() => focusable && onFocusTopic({ label: `${title}: ${item.name}`, value: item.value, status: item.status })}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span>{focusable && <small>Discuss →</small>}</button></li>;
+    return <li key={item.id}><button type="button" disabled={!focusable} onClick={() => focusable && onFocusTopic({ topicId: item.id, label: `${title}: ${item.name}`, value: item.value, status: item.status })}><div><strong>{item.name}</strong><StatusPill status={item.status} /></div><span>{item.value}</span>{focusable && <small>Discuss →</small>}</button></li>;
   })}</ul></BriefSection>;
 }
 

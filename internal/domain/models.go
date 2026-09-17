@@ -3,15 +3,17 @@ package domain
 import "time"
 
 type Session struct {
-	ID          string               `json:"id"`
-	Title       string               `json:"title"`
-	State       string               `json:"state"`
-	CreatedAt   time.Time            `json:"createdAt"`
-	UpdatedAt   time.Time            `json:"updatedAt"`
-	Messages    []Message            `json:"messages,omitempty"`
-	Brief       *LivingBrief         `json:"brief,omitempty"`
-	Prototypes  []PrototypeIteration `json:"prototypes,omitempty"`
-	Deployments []Deployment         `json:"deployments,omitempty"`
+	Revision      *RevisionProposal    `json:"-"`
+	RevisionFiles map[string]string    `json:"-"`
+	ID            string               `json:"id"`
+	Title         string               `json:"title"`
+	State         string               `json:"state"`
+	CreatedAt     time.Time            `json:"createdAt"`
+	UpdatedAt     time.Time            `json:"updatedAt"`
+	Messages      []Message            `json:"messages,omitempty"`
+	Brief         *LivingBrief         `json:"brief,omitempty"`
+	Prototypes    []PrototypeIteration `json:"prototypes,omitempty"`
+	Deployments   []Deployment         `json:"deployments,omitempty"`
 }
 
 type Deployment struct {
@@ -81,15 +83,17 @@ type Operation struct {
 }
 
 type BriefItem struct {
+	ID     string `json:"id,omitempty"`
 	Name   string `json:"name"`
 	Value  string `json:"value"`
 	Status string `json:"status"`
 }
 
 type BriefFocus struct {
-	Label  string `json:"label"`
-	Value  string `json:"value"`
-	Status string `json:"status"`
+	TopicID string `json:"topicId"`
+	Label   string `json:"label"`
+	Value   string `json:"value"`
+	Status  string `json:"status"`
 }
 
 type BriefThread struct {

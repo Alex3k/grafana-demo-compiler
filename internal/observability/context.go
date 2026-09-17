@@ -12,6 +12,9 @@ type contextManifestKey struct{}
 // selected for one model generation. The manifest contains counts and topic
 // identifiers only, so it is safe to expose as observability metadata.
 func WithContextManifest(ctx context.Context, manifest contextengine.Manifest) context.Context {
+	manifest.IncludedTopicKeys = append([]string(nil), manifest.IncludedTopicKeys...)
+	manifest.IncludedSections = append([]contextengine.SectionDecision(nil), manifest.IncludedSections...)
+	manifest.DroppedSections = append([]contextengine.SectionDecision(nil), manifest.DroppedSections...)
 	return context.WithValue(ctx, contextManifestKey{}, manifest)
 }
 

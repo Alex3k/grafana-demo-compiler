@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
+	"github.com/Alex3k/grafana-demo-compiler/internal/prototype"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
 )
 
@@ -30,10 +32,11 @@ type PrototypeBuilder interface {
 }
 
 type PrototypeService struct {
-	store PrototypeStore
-	build PrototypeBuilder
-	log   *slog.Logger
-	root  string
+	startMu sync.Mutex
+	store   PrototypeStore
+	build   PrototypeBuilder
+	log     *slog.Logger
+	root    string
 }
 
 func NewPrototypeService(dataStore PrototypeStore, builder PrototypeBuilder, logger *slog.Logger, root string) *PrototypeService {
@@ -46,6 +49,16 @@ func NewPrototypeService(dataStore PrototypeStore, builder PrototypeBuilder, log
 // Start records a new iteration and detaches generation from the caller's
 // context. The returned iteration is the accepted, queued representation.
 func (s *PrototypeService) Start(ctx context.Context, sessionID string) (domain.PrototypeIteration, *Fault) {
+	return s.start(ctx, sessionID, nil)
+}
+
+func (s *PrototypeService) StartRevision(ctx context.Context, sessionID string, revision domain.RevisionProposal) (domain.PrototypeIteration, *Fault) {
+	return s.start(ctx, sessionID, &revision)
+}
+
+func (s *PrototypeService) start(ctx context.Context, sessionID string, revision *domain.RevisionProposal) (domain.PrototypeIteration, *Fault) {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
 	session, err := s.store.GetSession(ctx, sessionID)
 	if errors.Is(err, store.ErrNotFound) {
 		return domain.PrototypeIteration{}, &Fault{Code: FaultNotFound, Public: "Session not found", Cause: err}
@@ -58,6 +71,27 @@ func (s *PrototypeService) Start(ctx context.Context, sessionID string) (domain.
 	}
 	if len(session.Prototypes) > 0 && session.Prototypes[0].Status == "generating" {
 		return domain.PrototypeIteration{}, &Fault{Code: FaultConflict, Public: "A prototype iteration is already running"}
+	}
+	if revision != nil {
+		if revision.SessionID != sessionID || revision.Status != "approved" || revision.BriefVersion != session.Brief.Version {
+			return domain.PrototypeIteration{}, &Fault{Code: FaultConflict, Public: "The brief changed or approval is invalid. Request a fresh revision proposal; confirmed decisions are not changed by revision approval."}
+		}
+		var base *domain.PrototypeIteration
+		for i := range session.Prototypes {
+			if session.Prototypes[i].ID == revision.BaseIterationID && session.Prototypes[i].Status == "complete" {
+				base = &session.Prototypes[i]
+				break
+			}
+		}
+		if base == nil {
+			return domain.PrototypeIteration{}, &Fault{Code: FaultConflict, Public: "The approved base iteration is no longer available"}
+		}
+		files, digest, err := prototype.SourceSnapshot(*base)
+		if err != nil || digest != revision.SourceDigest {
+			return domain.PrototypeIteration{}, &Fault{Code: FaultConflict, Public: "Prototype source changed. Inspect it and request a fresh proposal", Cause: err}
+		}
+		session.Revision = revision
+		session.RevisionFiles = files
 	}
 
 	iteration, err := s.store.CreatePrototypeIteration(ctx, session.ID, session.Brief.Version)

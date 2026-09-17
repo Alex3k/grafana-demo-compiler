@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/brieftopics"
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
@@ -40,15 +41,24 @@ type ConfirmedBriefTopic struct {
 	Activity domain.Message     `json:"activity"`
 }
 
-func (s *BriefService) OpenThread(ctx context.Context, sessionID string, focus domain.BriefFocus) (domain.BriefThread, error) {
-	if err := ValidateBriefFocus(&focus); err != nil {
-		return domain.BriefThread{}, err
+func (s *BriefService) OpenThread(ctx context.Context, sessionID, topicID string) (domain.BriefThread, error) {
+	topicID = strings.TrimSpace(topicID)
+	if topicID == "" || utf8.RuneCountInString(topicID) > 120 {
+		return domain.BriefThread{}, fault(FaultInvalid, "Invalid brief topic", nil)
 	}
-	if _, err := s.store.GetSession(ctx, sessionID); err != nil {
+	session, err := s.store.GetSession(ctx, sessionID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return domain.BriefThread{}, fault(FaultNotFound, "Session not found", err)
 		}
 		return domain.BriefThread{}, fault(FaultInternal, "Session not found", err)
+	}
+	if session.Brief == nil {
+		return domain.BriefThread{}, fault(FaultConflict, "The living brief is not ready for a focused conversation", nil)
+	}
+	focus, ok := brieftopics.Resolve(&session.Brief.Content, topicID)
+	if !ok || (focus.Status != "proposed" && focus.Status != "confirmed") {
+		return domain.BriefThread{}, fault(FaultInvalid, "Brief topic is unavailable", nil)
 	}
 	thread, err := s.store.OpenBriefThread(ctx, sessionID, focus)
 	if err != nil {
@@ -149,7 +159,7 @@ func (s *BriefService) ConfirmThread(ctx context.Context, sessionID, threadID st
 		return ConfirmedBriefTopic{}, fault(FaultConflict, "The living brief is not ready for a focused confirmation", nil)
 	}
 	content := session.Brief.Content
-	if !ApplyBriefTopic(&content, thread.Focus.Label, thread.CandidateValue) {
+	if !brieftopics.Apply(&content, thread.Focus.TopicID, thread.CandidateValue) {
 		return ConfirmedBriefTopic{}, fault(FaultUnprocessable, "The confirmed topic could not be matched in the living brief", nil)
 	}
 	brief, err := s.store.ApplyBriefThread(ctx, session.ID, thread.ID, content)
@@ -188,7 +198,7 @@ func (s *BriefService) UpdateLivingBrief(ctx context.Context, session domain.Ses
 		var result chat.BriefResult
 		result, err = s.chat.BuildBrief(ctx, session, messages, parentGenerationIDs...)
 		if err == nil && result.Unchanged && session.Brief != nil {
-			err = s.store.AdvanceBriefCursor(ctx, session.ID, session.Brief.Version, latestConversationalMessageID(messages))
+			err = s.store.AdvanceBriefCursor(ctx, session.ID, session.Brief.Version, result.ConsumedMessageID)
 			if err == nil {
 				activity.Content, activity.Status = "Brief unchanged", "complete"
 				_ = s.store.FinishOperation(ctx, operation.ID, "complete", "Brief unchanged", "")
@@ -212,7 +222,7 @@ func (s *BriefService) UpdateLivingBrief(ctx context.Context, session domain.Ses
 			}
 			if err == nil {
 				var brief domain.LivingBrief
-				brief, err = s.store.SaveBriefWithCursor(ctx, session.ID, latestConversationalMessageID(messages), content)
+				brief, err = s.store.SaveBriefWithCursor(ctx, session.ID, result.ConsumedMessageID, content)
 				if err == nil {
 					activity.Content, activity.Status = "Living brief updated", "complete"
 					s.updateSessionState(ctx, session, content, sink)
@@ -270,17 +280,6 @@ func (s *BriefService) failFocusedTurn(ctx context.Context, message domain.Messa
 	return fault(FaultBadGateway, public, cause)
 }
 
-func ValidateBriefFocus(focus *domain.BriefFocus) error {
-	focus.Label, focus.Value = strings.TrimSpace(focus.Label), strings.TrimSpace(focus.Value)
-	if focus.Label == "" || utf8.RuneCountInString(focus.Label) > 120 || utf8.RuneCountInString(focus.Value) > 8_000 {
-		return fault(FaultInvalid, "Invalid brief topic context", nil)
-	}
-	if focus.Status != "proposed" && focus.Status != "confirmed" {
-		return fault(FaultInvalid, "Brief topic must be proposed or confirmed", nil)
-	}
-	return nil
-}
-
 func FocusedCandidate(response string) (string, bool) {
 	const heading = "### Proposed brief value"
 	index := strings.LastIndex(response, heading)
@@ -289,30 +288,6 @@ func FocusedCandidate(response string) (string, bool) {
 	}
 	value := strings.TrimSpace(response[index+len(heading):])
 	return value, value != "" && utf8.RuneCountInString(value) <= 8_000
-}
-
-func ApplyBriefTopic(content *domain.BriefContent, label, value string) bool {
-	core := map[string]*domain.BriefItem{"Audience": &content.Audience, "Company": &content.Company, "Outcome": &content.Outcome, "Stakes": &content.Stakes, "Scenario": &content.Scenario, "Journey": &content.Journey, "Simulation boundary": &content.Scope.SimulationBoundary}
-	if item := core[label]; item != nil {
-		item.Value, item.Status = value, "confirmed"
-		return true
-	}
-	section, name, found := strings.Cut(label, ": ")
-	if !found {
-		return false
-	}
-	collections := map[string]*[]domain.BriefItem{"Proof points": &content.ProofPoints, "Included scope": &content.Scope.Included, "Deliberately excluded": &content.Scope.Excluded, "Services": &content.Services, "Telemetry": &content.Telemetry, "Grafana resources": &content.GrafanaResources}
-	items := collections[section]
-	if items == nil {
-		return false
-	}
-	for index := range *items {
-		if strings.EqualFold((*items)[index].Name, name) {
-			(*items)[index].Value, (*items)[index].Status = value, "confirmed"
-			return true
-		}
-	}
-	return false
 }
 
 func emit(sink EventSink, name string, data any) error {
