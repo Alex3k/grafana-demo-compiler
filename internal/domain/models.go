@@ -14,6 +14,23 @@ type Session struct {
 	Brief         *LivingBrief         `json:"brief,omitempty"`
 	Prototypes    []PrototypeIteration `json:"prototypes,omitempty"`
 	Deployments   []Deployment         `json:"deployments,omitempty"`
+	GrafanaStack  *GrafanaStack        `json:"grafanaStack,omitempty"`
+}
+
+type GrafanaStack struct {
+	ID           string    `json:"id"`
+	SessionID    string    `json:"sessionId"`
+	Region       string    `json:"region"`
+	StackName    string    `json:"stackName"`
+	StackSlug    string    `json:"stackSlug"`
+	StackURL     string    `json:"stackUrl,omitempty"`
+	OTLPEndpoint string    `json:"otlpEndpoint,omitempty"`
+	InstanceID   string    `json:"instanceId,omitempty"`
+	Status       string    `json:"status"`
+	Progress     []string  `json:"progress"`
+	Error        string    `json:"error,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 type Deployment struct {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path"
 	"strings"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
@@ -31,20 +30,7 @@ func grafanaResourceOnly(files []string) bool {
 		return false
 	}
 	for _, file := range files {
-		file = path.Clean(file)
-		switch path.Ext(file) {
-		case ".json", ".yaml", ".yml":
-		default:
-			return false
-		}
-		resource := false
-		for _, dir := range []string{"dashboards/", "alerts/", "slos/", "grafana/dashboards/", "grafana/alerts/", "grafana/slos/"} {
-			if strings.HasPrefix(file, dir) {
-				resource = true
-				break
-			}
-		}
-		if !resource {
+		if !prototype.IsGrafanaResourcePath(file) {
 			return false
 		}
 	}
@@ -100,6 +86,11 @@ func (s *Service) revisionTools(ctx context.Context, session domain.Session, set
 				"tool":    "run_gcx",
 				"message": "These files contain only Grafana resource manifests. Discover command syntax and read live resources with run_gcx, then submit the resource change using @manifest and the inline manifest field for approval in Grafana actions. No prototype revision, build, or redeployment is needed. No revision was created.",
 			}, nil
+		}
+		for _, file := range in.Files {
+			if prototype.IsGrafanaResourcePath(file) {
+				return nil, errors.New("separate Grafana resource files into run_gcx actions; propose only application files in this revision")
+			}
 		}
 		base, err := sourceIteration(current, in.BaseIterationID)
 		if err != nil {

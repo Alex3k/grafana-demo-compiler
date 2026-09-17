@@ -21,6 +21,9 @@ func SessionStack(session domain.Session) string {
 		return ""
 	}
 	expected := "democompiler" + session.ID[:12]
+	if stack := session.GrafanaStack; stack != nil && stack.Status == "ready" && stack.StackSlug == expected && stack.StackURL != "" {
+		return expected
+	}
 	for _, d := range session.Deployments {
 		if d.StackSlug == expected && d.StackURL != "" {
 			return expected

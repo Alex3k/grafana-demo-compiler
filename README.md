@@ -60,11 +60,14 @@ The normal path is:
    decisions that should be locked.
 4. Accept a bounded prototype offer.
 5. Generate and validate a prototype iteration in the background.
-6. Create or reuse the session's Grafana Cloud stack through `gcx`.
+6. Create or reuse the session's Grafana Cloud stack through the independent
+   Grafana area. This can also happen before steps 4–5, with no prototype.
 7. Supply a Cloud Access Policy token when prompted so the local
    Alloy instance can send telemetry.
 8. Build and start the generated application with Docker Compose.
-9. Continue the conversation to revise the demo and create another iteration.
+9. Revise application code through prototype iterations. Iterate Grafana
+   dashboards, alerts, SLOs, and other resources directly through gcx approval
+   and action history, without app revisions or Docker redeployment.
 
 ## Agent design
 
@@ -305,8 +308,10 @@ Before deploying a generated prototype:
 gcx cloud login
 ```
 
-The deployment UI asks for a Grafana Cloud region, creates or reuses the
-session's stack, and then requests a Cloud Access Policy token with
+The Grafana area creates the session's stack independently of prototype builds.
+It owns stack status and gcx action history. The Application area deploys a
+completed prototype only once that stack is ready, without provisioning it again,
+and requests a Cloud Access Policy token with
 `stacks:read`, `metrics:write`, `logs:write`, and `traces:write`. The token is
 saved in the generated iteration's local `.env` file with owner-only
 permissions and supplied to the generated Alloy runtime through Compose. It is

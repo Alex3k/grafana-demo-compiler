@@ -238,6 +238,9 @@ SET source_message_id = COALESCE((
 	if err := s.migrateBriefTopicIDs(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateSessionStacks(ctx); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE brief_thread_messages SET status = 'interrupted' WHERE status = 'streaming';
@@ -430,6 +433,10 @@ func (s *Store) GetSession(ctx context.Context, id string) (domain.Session, erro
 		return domain.Session{}, err
 	}
 	session.Deployments = deployments
+	session.GrafanaStack, err = s.GetGrafanaStack(ctx, id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return domain.Session{}, err
+	}
 	return session, nil
 }
 
@@ -440,20 +447,25 @@ func (s *Store) SessionDeleting(ctx context.Context, id string) (bool, error) {
 }
 
 func (s *Store) BeginSessionDeletion(ctx context.Context, id string) error {
-	var busy int
-	err := s.db.QueryRowContext(ctx, `SELECT
- (SELECT COUNT(*) FROM operations WHERE session_id = ? AND status = 'running') +
- (SELECT COUNT(*) FROM brief_thread_messages WHERE session_id = ? AND status = 'streaming') +
- (SELECT COUNT(*) FROM prototype_iterations WHERE session_id = ? AND status = 'generating') +
- (SELECT COUNT(*) FROM deployments WHERE session_id = ? AND status IN ('provisioning','starting','verifying'))`, id, id, id, id).Scan(&busy)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO session_deletions(session_id)
+ SELECT ? WHERE
+ NOT EXISTS (SELECT 1 FROM operations WHERE session_id = ? AND status = 'running') AND
+ NOT EXISTS (SELECT 1 FROM brief_thread_messages WHERE session_id = ? AND status = 'streaming') AND
+ NOT EXISTS (SELECT 1 FROM prototype_iterations WHERE session_id = ? AND status = 'generating') AND
+ NOT EXISTS (SELECT 1 FROM deployments WHERE session_id = ? AND status IN ('provisioning','starting','verifying')) AND
+ NOT EXISTS (SELECT 1 FROM session_stacks WHERE session_id = ? AND status = 'provisioning')
+ ON CONFLICT(session_id) DO UPDATE SET session_id = excluded.session_id`, id, id, id, id, id, id)
 	if err != nil {
 		return err
 	}
-	if busy > 0 {
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
 		return errors.New("wait for this session's active operations to finish before deleting")
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO session_deletions(session_id) VALUES (?)`, id)
-	return err
+	return nil
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
@@ -475,8 +487,8 @@ func (s *Store) CreateDeployment(ctx context.Context, deployment domain.Deployme
 		return domain.Deployment{}, fmt.Errorf("encode deployment progress: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO deployments(id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, status, progress, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, deployment.ID, deployment.SessionID, deployment.PrototypeIterationID, deployment.Target, deployment.Region, deployment.StackName, deployment.StackSlug, deployment.Status, string(progress), formatTime(now), formatTime(now))
+INSERT INTO deployments(id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, deployment.ID, deployment.SessionID, deployment.PrototypeIterationID, deployment.Target, deployment.Region, deployment.StackName, deployment.StackSlug, deployment.StackURL, deployment.OTLPEndpoint, deployment.InstanceID, deployment.Status, string(progress), formatTime(now), formatTime(now))
 	if err != nil {
 		return domain.Deployment{}, fmt.Errorf("create deployment: %w", err)
 	}

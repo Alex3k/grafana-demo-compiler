@@ -662,6 +662,9 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		Title:       "Write demo file",
 		Description: "Write one complete file inside the current local prototype revision.",
 		Execute: func(_ context.Context, input writeDemoFileInput, _ aisdk.ToolExecutionOptions) (domain.PrototypeArtifact, error) {
+			if prototype.IsGrafanaResourcePath(input.Path) {
+				return domain.PrototypeArtifact{}, errors.New("Grafana resource manifests belong to the independent gcx workflow, not the application prototype; omit this file and continue with app code and telemetry")
+			}
 			if session.Revision != nil {
 				allowed := false
 				for _, path := range session.Revision.Files {

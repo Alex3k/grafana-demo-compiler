@@ -3,9 +3,10 @@ import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { GrafanaActions } from "./GrafanaActions";
+import { GrafanaStackCard } from "./GrafanaStackCard";
 import { PrototypeRevisions } from "./PrototypeRevisions";
 import { api, streamBriefThreadMessage, streamMessage } from "./api";
-import type { BriefFocus, BriefItem, BriefThread, ContextUsage, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefItem, BriefThread, ContextUsage, Deployment, GrafanaStack, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
@@ -399,6 +400,7 @@ function App() {
           prototypeProgress={prototypeActivity[prototypeActivity.length - 1] ?? ""}
           onBuildPrototype={() => void buildPrototype()}
           onDeployLocal={(region) => void deployLocal(region)}
+          onStackUpdated={(stack) => setActive(current => current?.id === stack.sessionId ? { ...current, grafanaStack: stack } : current)}
           onSubmitTelemetryToken={submitTelemetryToken}
         />
         {topicThread && active && (
@@ -617,17 +619,24 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
   );
 }
 
-function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken, onRevisionStarted }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => Promise<boolean>; onRevisionStarted: (iteration: PrototypeIteration) => void }) {
+function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onStackUpdated, onSubmitTelemetryToken, onRevisionStarted }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onStackUpdated: (stack: GrafanaStack) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => Promise<boolean>; onRevisionStarted: (iteration: PrototypeIteration) => void }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
-      {session?.brief && <PrototypeCard offer={session.brief.content.prototypeOffer} iteration={session.prototypes?.[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />}
-      {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard key={`deployment:${session.id}`} session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
+      {session && <section className="session-work-area" aria-label="Grafana">
+        <p className="eyebrow rail-section">GRAFANA</p>
+        <GrafanaStackCard key={`grafana-stack:${session.id}`} session={session} onUpdated={onStackUpdated} />
+        <GrafanaActions key={`grafana-actions:${session.id}`} sessionId={session.id} />
+      </section>}
+      {session && <section className="session-work-area" aria-label="Application">
+        <p className="eyebrow rail-section">APPLICATION</p>
+        {session.brief && <PrototypeCard offer={session.brief.content.prototypeOffer} iteration={session.prototypes?.[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />}
+        <PrototypeRevisions key={`revisions:${session.id}`} sessionId={session.id} iterations={session.prototypes ?? []} onStarted={onRevisionStarted} />
+        <DeploymentCard key={`deployment:${session.id}`} session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />
+      </section>}
       <ContextUsageCard key={`context-usage:${session?.id ?? "no-session"}`} sessionId={session?.id} />
-      {session && <GrafanaActions key={`grafana-actions:${session.id}`} sessionId={session.id} />}
-      {session && <PrototypeRevisions key={`revisions:${session.id}`} sessionId={session.id} iterations={session.prototypes ?? []} onStarted={onRevisionStarted} />}
       <p className="eyebrow rail-section">LIVING BRIEF</p>
       {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
@@ -824,33 +833,31 @@ function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: L
 }
 
 function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { session: Session; deployment?: Deployment; onDeploy: (region: string) => void; onSubmitToken: (deploymentId: string, token: string) => Promise<boolean> }) {
-  const [region, setRegion] = useState("prod-us-east-0");
   const [token, setToken] = useState("");
   const [tokenSubmitting, setTokenSubmitting] = useState(false);
   const busy = deployment && ["provisioning", "starting", "verifying"].includes(deployment.status);
   const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted";
-  const stackSlug = `democompiler${session.id.slice(0, 12).toLowerCase()}`;
-  const stackName = `${session.title} demo ${session.id.slice(0, 12)}`;
+  const stack = session.grafanaStack;
+  const prototypeReady = session.prototypes?.some((prototype) => prototype.status === "complete");
+  const canDeploy = prototypeReady && stack?.status === "ready";
   const progress = deployment?.progress?.at(-1);
 	const tokenHelp = deployment?.stackUrl ? `${deployment.stackUrl.replace(/\/$/, "")}/a/grafana-auth-app` : "https://grafana.com";
 
   return <section className={`deployment-card status-${deployment?.status ?? "ready"}`}>
     <span>LOCAL DEPLOYMENT</span>
-    {!deployment && <p>Create one dedicated Grafana Cloud stack, then run this prototype locally with Docker Compose.</p>}
+    {!deployment && <p>Run the generated application locally with Docker Compose and send telemetry to this demo’s Grafana stack.</p>}
     {deployment && <div className="deployment-status"><strong>{deployment.status.replaceAll("_", " ")}</strong>{progress && <small>{busy && <span className="activity-pulse" />}{progress}</small>}</div>}
-    {deployment?.stackUrl && <a className="deployment-stack-link" href={deployment.stackUrl} target="_blank" rel="noreferrer">Open {deployment.stackSlug} ↗</a>}
     {deployment?.error && <p className="deployment-error">{deployment.error}</p>}
 
     {canRetry && <form className="deployment-form" onSubmit={(event) => {
       event.preventDefault();
-		if (region.trim()) onDeploy(region.trim());
+		if (canDeploy && stack) onDeploy(stack.region);
 	}}>
-		<label>Grafana Cloud region<input value={region} onChange={(event) => setRegion(event.target.value)} placeholder="for example prod-gb-south-0" autoComplete="off" /></label>
       <div className="deployment-confirm"><small>Application target</small><strong>Local Docker Compose only</strong></div>
-      <div className="deployment-confirm"><small>Stack name</small><strong>{stackName}</strong></div>
-      <div className="deployment-confirm"><small>New stack</small><code>{stackSlug}.grafana.net</code></div>
-		<button type="submit" disabled={!region.trim()}>Create stack and deploy locally</button>
-      <small>Creating a Grafana Cloud stack may incur usage costs. Delete protection remains enabled.</small>
+      {stack && <div className="deployment-confirm"><small>Grafana stack</small><strong>{stack.stackSlug}</strong></div>}
+		<button type="submit" disabled={!canDeploy}>Deploy locally</button>
+      {!prototypeReady && <small>Build a prototype before deploying the application.</small>}
+      {stack?.status !== "ready" && <small>Create a ready Grafana stack in the Grafana section before deploying.</small>}
     </form>}
 
     {deployment?.status === "needs_token" && <form className="deployment-form token-form" onSubmit={async (event) => {

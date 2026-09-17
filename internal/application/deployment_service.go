@@ -17,6 +17,8 @@ import (
 )
 
 type DeploymentStore interface {
+	ClaimGrafanaStack(context.Context, domain.GrafanaStack) (domain.GrafanaStack, bool, error)
+	UpdateGrafanaStack(context.Context, domain.GrafanaStack) error
 	GetSession(context.Context, string) (domain.Session, error)
 	CreateDeployment(context.Context, domain.Deployment) (domain.Deployment, error)
 	GetDeployment(context.Context, string, string) (domain.Deployment, error)
@@ -48,16 +50,11 @@ func NewDeploymentService(dataStore DeploymentStore, runner DeploymentRunner, lo
 	return &DeploymentService{store: dataStore, runner: runner, log: logger, root: prototypeRoot}
 }
 
-// Start validates a local-only deployment request, records it, and detaches
-// Grafana Cloud stack provisioning from the caller's context.
+// Start attaches a local application deployment to the session's ready stack.
 func (s *DeploymentService) Start(ctx context.Context, sessionID, target, region string) (domain.Deployment, *Fault) {
 	target = strings.TrimSpace(strings.ToLower(target))
-	region = strings.TrimSpace(region)
 	if target != "local" {
 		return domain.Deployment{}, &Fault{Code: FaultUnprocessable, Public: "This MVP only deploys application services locally with Docker Compose"}
-	}
-	if region == "" {
-		return domain.Deployment{}, &Fault{Code: FaultInvalid, Public: "Grafana Cloud region is required"}
 	}
 	session, err := s.store.GetSession(ctx, sessionID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -65,6 +62,10 @@ func (s *DeploymentService) Start(ctx context.Context, sessionID, target, region
 	}
 	if err != nil {
 		return domain.Deployment{}, &Fault{Code: FaultInternal, Public: "Could not load session", Cause: err}
+	}
+	stack := session.GrafanaStack
+	if stack == nil || stack.Status != "ready" {
+		return domain.Deployment{}, &Fault{Code: FaultConflict, Public: "Create a Grafana Cloud stack and wait for it to be ready before deploying"}
 	}
 	prototype := latestCompletedPrototype(session.Prototypes)
 	if prototype == nil {
@@ -76,20 +77,50 @@ func (s *DeploymentService) Start(ctx context.Context, sessionID, target, region
 			return domain.Deployment{}, &Fault{Code: FaultConflict, Public: "This session already has an active local deployment"}
 		}
 	}
+	item, err := s.store.CreateDeployment(ctx, domain.Deployment{
+		SessionID: session.ID, PrototypeIterationID: prototype.ID,
+		Target: "local", Region: stack.Region,
+		StackName: stack.StackName, StackSlug: stack.StackSlug,
+		StackURL: stack.StackURL, OTLPEndpoint: stack.OTLPEndpoint, InstanceID: stack.InstanceID,
+		Status:   "needs_token",
+		Progress: []string{"Using the session's Grafana Cloud stack; an OTLP access-policy token is required"},
+	})
+	if err != nil {
+		return domain.Deployment{}, &Fault{Code: FaultInternal, Public: "Could not create deployment", Cause: err}
+	}
+	return item, nil
+}
+
+// CreateStack provisions Grafana independently of prototype generation.
+func (s *DeploymentService) CreateStack(ctx context.Context, sessionID, region string) (domain.GrafanaStack, *Fault) {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return domain.GrafanaStack{}, &Fault{Code: FaultInvalid, Public: "Grafana Cloud region is required"}
+	}
+	session, err := s.store.GetSession(ctx, sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		return domain.GrafanaStack{}, &Fault{Code: FaultNotFound, Public: "Session not found", Cause: err}
+	}
+	if err != nil {
+		return domain.GrafanaStack{}, &Fault{Code: FaultInternal, Public: "Could not load session", Cause: err}
+	}
+	if session.GrafanaStack != nil && session.GrafanaStack.Status != "failed" {
+		return domain.GrafanaStack{}, &Fault{Code: FaultConflict, Public: "This session already has a Grafana Cloud stack"}
+	}
 	shortID := session.ID
 	if len(shortID) > 12 {
 		shortID = shortID[:12]
 	}
-	item, err := s.store.CreateDeployment(ctx, domain.Deployment{
-		SessionID: session.ID, PrototypeIterationID: prototype.ID,
-		Target: "local", Region: region,
-		StackName: session.Title + " demo " + shortID,
-		StackSlug: "democompiler" + strings.ToLower(shortID),
-		Status:    "provisioning",
-		Progress:  []string{"Deployment accepted: local Docker Compose only"},
+	item, claimed, err := s.store.ClaimGrafanaStack(ctx, domain.GrafanaStack{
+		SessionID: session.ID, Region: region, StackName: session.Title + " demo " + shortID,
+		StackSlug: "democompiler" + strings.ToLower(shortID), Status: "provisioning",
+		Progress: []string{"Grafana Cloud stack creation accepted"},
 	})
 	if err != nil {
-		return domain.Deployment{}, &Fault{Code: FaultInternal, Public: "Could not create deployment", Cause: err}
+		return domain.GrafanaStack{}, &Fault{Code: FaultInternal, Public: "Could not create Grafana Cloud stack", Cause: err}
+	}
+	if !claimed {
+		return domain.GrafanaStack{}, &Fault{Code: FaultConflict, Public: "This session already has a Grafana Cloud stack or is being deleted"}
 	}
 	go s.provision(item)
 	return item, nil
@@ -180,10 +211,20 @@ func (s *DeploymentService) ConfigureToken(ctx context.Context, sessionID, deplo
 	return item, nil
 }
 
-func (s *DeploymentService) provision(item domain.Deployment) {
+func (s *DeploymentService) provision(item domain.GrafanaStack) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	appendProgress := s.deploymentProgressAppender(&item)
+	appendProgress := func(message string) {
+		if strings.TrimSpace(message) == "" {
+			return
+		}
+		item.Progress = append(item.Progress, message)
+		persistCtx, cancelPersist := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelPersist()
+		if err := s.store.UpdateGrafanaStack(persistCtx, item); err != nil {
+			s.log.Error("save stack progress", "sessionId", item.SessionID, "error", err)
+		}
+	}
 	stack, err := s.runner.Provision(ctx, item.Region, item.StackName, item.StackSlug, appendProgress)
 	if err != nil {
 		item.Status = "failed"
@@ -191,12 +232,12 @@ func (s *DeploymentService) provision(item domain.Deployment) {
 		appendProgress("Stack provisioning stopped: " + actionableDeploymentError(err))
 	} else {
 		item.StackURL, item.OTLPEndpoint, item.InstanceID = stack.URL, stack.OTLPEndpoint, stack.InstanceID
-		item.Status = "needs_token"
-		appendProgress("Grafana Cloud stack is ready; an OTLP access-policy token is required")
+		item.Status = "ready"
+		appendProgress("Grafana Cloud stack is ready")
 	}
 	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelPersist()
-	if err := s.store.UpdateDeployment(persistCtx, item); err != nil {
+	if err := s.store.UpdateGrafanaStack(persistCtx, item); err != nil {
 		s.log.Error("finish stack provisioning", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
 	}
 }

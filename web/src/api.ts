@@ -1,4 +1,4 @@
-import type { BriefThread, ContextUsage, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
+import type { BriefThread, ContextUsage, Deployment, GrafanaStack, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -38,6 +38,8 @@ export const api = {
     }),
   createPrototype: (sessionId: string) =>
     json<PrototypeIteration>(`/api/sessions/${sessionId}/prototypes`, { method: "POST" }),
+  createStack: (sessionId: string, region: string) =>
+    json<GrafanaStack>(`/api/sessions/${sessionId}/stack`, { method: "POST", body: JSON.stringify({ region }) }),
   createDeployment: (sessionId: string, region: string) =>
     json<Deployment>(`/api/sessions/${sessionId}/deployments`, {
       method: "POST",

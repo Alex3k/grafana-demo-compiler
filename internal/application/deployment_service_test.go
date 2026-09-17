@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,13 +16,35 @@ import (
 )
 
 type deploymentStoreStub struct {
-	mu         sync.Mutex
-	session    domain.Session
-	deployment domain.Deployment
-	active     []domain.Deployment
-	sessions   map[string]domain.Session
-	states     map[string]string
-	updates    chan domain.Deployment
+	mu           sync.Mutex
+	session      domain.Session
+	deployment   domain.Deployment
+	active       []domain.Deployment
+	sessions     map[string]domain.Session
+	states       map[string]string
+	updates      chan domain.Deployment
+	stackUpdates chan domain.GrafanaStack
+}
+
+func (s *deploymentStoreStub) ClaimGrafanaStack(_ context.Context, item domain.GrafanaStack) (domain.GrafanaStack, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session.GrafanaStack != nil && s.session.GrafanaStack.Status != "failed" {
+		return item, false, nil
+	}
+	item.ID = "stack-1"
+	s.session.GrafanaStack = &item
+	return item, true, nil
+}
+func (s *deploymentStoreStub) UpdateGrafanaStack(_ context.Context, item domain.GrafanaStack) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.session.GrafanaStack = &item
+	select {
+	case s.stackUpdates <- item:
+	default:
+	}
+	return nil
 }
 
 func (s *deploymentStoreStub) GetSession(_ context.Context, id string) (domain.Session, error) {
@@ -91,12 +114,14 @@ func (s *deploymentStoreStub) activeStatusesAndSessionState(sessionID string) ([
 }
 
 type deploymentRunnerStub struct {
-	started chan string
-	actions chan string
-	stopErr error
+	provisions atomic.Int32
+	started    chan string
+	actions    chan string
+	stopErr    error
 }
 
 func (r *deploymentRunnerStub) Provision(_ context.Context, _, _, _ string, progress func(string)) (deployment.Stack, error) {
+	r.provisions.Add(1)
 	progress("creating stack")
 	return deployment.Stack{URL: "https://demo.grafana.net", OTLPEndpoint: "https://otlp-gateway-prod-us-east-0.grafana.net/otlp", InstanceID: "123"}, nil
 }
@@ -119,16 +144,15 @@ func (r *deploymentRunnerStub) StartLocal(_ context.Context, _, _, _, _, token, 
 	return nil
 }
 
-func TestDeploymentServiceStartProvisionsInBackground(t *testing.T) {
-	prototype := domain.PrototypeIteration{ID: "prototype-1", Status: "complete"}
+func TestDeploymentServiceCreatesStackWithoutPrototype(t *testing.T) {
 	dataStore := &deploymentStoreStub{
-		session: domain.Session{ID: "ABCDEF123456789", Title: "Camera demo", Prototypes: []domain.PrototypeIteration{prototype}},
-		updates: make(chan domain.Deployment, 10),
+		session:      domain.Session{ID: "ABCDEF123456789", Title: "Camera demo", State: "Draft"},
+		stackUpdates: make(chan domain.GrafanaStack, 10),
 	}
 	runner := &deploymentRunnerStub{started: make(chan string, 1)}
 	service := NewDeploymentService(dataStore, runner, slog.New(slog.NewTextHandler(io.Discard, nil)), t.TempDir())
 
-	accepted, fault := service.Start(context.Background(), dataStore.session.ID, "local", "prod-us-east-0")
+	accepted, fault := service.CreateStack(context.Background(), dataStore.session.ID, "prod-us-east-0")
 	if fault != nil {
 		t.Fatalf("Start returned fault: %v", fault)
 	}
@@ -139,12 +163,19 @@ func TestDeploymentServiceStartProvisionsInBackground(t *testing.T) {
 	deadline := time.After(time.Second)
 	for {
 		select {
-		case updated := <-dataStore.updates:
-			if updated.Status == "needs_token" {
+		case updated := <-dataStore.stackUpdates:
+			if updated.Status == "ready" {
+				if updated.StackURL == "" || updated.InstanceID == "" {
+					t.Fatal("missing stack metadata")
+				}
+				loaded, _ := dataStore.GetSession(context.Background(), accepted.SessionID)
+				if loaded.State != "Draft" {
+					t.Fatal("stack creation changed session state")
+				}
 				return
 			}
 		case <-deadline:
-			t.Fatal("background provisioning did not reach needs_token")
+			t.Fatal("background provisioning did not reach ready")
 		}
 	}
 }
@@ -197,18 +228,33 @@ func TestDeploymentServiceAllowsAValidatedIterationToReplaceRunningSession(t *te
 	dataStore := &deploymentStoreStub{
 		session: domain.Session{
 			ID: "session-1", Title: "Camera demo", Prototypes: []domain.PrototypeIteration{prototype},
-			Deployments: []domain.Deployment{{ID: "deployment-1", Status: "running"}},
+			GrafanaStack: &domain.GrafanaStack{Status: "ready", StackSlug: "existing-stack", StackURL: "https://existing.grafana.net", Region: "original-region"},
+			Deployments:  []domain.Deployment{{ID: "deployment-1", Status: "running"}},
 		},
 		updates: make(chan domain.Deployment, 10),
 	}
-	service := NewDeploymentService(dataStore, &deploymentRunnerStub{started: make(chan string, 1)}, nil, t.TempDir())
+	runner := &deploymentRunnerStub{started: make(chan string, 1)}
+	service := NewDeploymentService(dataStore, runner, nil, t.TempDir())
 
 	accepted, fault := service.Start(context.Background(), dataStore.session.ID, "local", "prod-us-east-0")
 	if fault != nil {
 		t.Fatalf("Start returned fault: %v", fault)
 	}
-	if accepted.Status != "provisioning" {
-		t.Fatalf("replacement status = %q, want provisioning", accepted.Status)
+	if accepted.Status != "needs_token" || accepted.StackSlug != "existing-stack" || accepted.Region != "original-region" || accepted.StackURL != "https://existing.grafana.net" {
+		t.Fatalf("replacement did not reuse existing stack: %#v", accepted)
+	}
+	if runner.provisions.Load() != 0 {
+		t.Fatal("deployment reprovisioned the stack")
+	}
+}
+
+func TestDeploymentServiceRequiresReadyStack(t *testing.T) {
+	for _, stack := range []*domain.GrafanaStack{nil, {Status: "provisioning"}, {Status: "failed"}} {
+		dataStore := &deploymentStoreStub{session: domain.Session{ID: "session", GrafanaStack: stack, Prototypes: []domain.PrototypeIteration{{ID: "prototype", Status: "complete"}}}}
+		service := NewDeploymentService(dataStore, &deploymentRunnerStub{}, nil, t.TempDir())
+		if _, fault := service.Start(context.Background(), "session", "local", ""); fault == nil || fault.Code != FaultConflict {
+			t.Fatalf("expected stack conflict, got %v", fault)
+		}
 	}
 }
 

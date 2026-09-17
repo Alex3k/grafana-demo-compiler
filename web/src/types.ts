@@ -28,6 +28,23 @@ export interface Session {
   brief?: LivingBrief;
   prototypes?: PrototypeIteration[];
   deployments?: Deployment[];
+  grafanaStack?: GrafanaStack;
+}
+
+export interface GrafanaStack {
+  id: string;
+  sessionId: string;
+  region: string;
+  stackName: string;
+  stackSlug: string;
+  stackUrl?: string;
+  otlpEndpoint?: string;
+  instanceId?: string;
+  status: "provisioning" | "ready" | "failed";
+  progress: string[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Deployment {

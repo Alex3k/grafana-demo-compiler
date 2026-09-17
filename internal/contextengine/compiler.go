@@ -117,9 +117,10 @@ type Fact struct {
 }
 
 type OperationalState struct {
-	SessionState     string             `json:"sessionState"`
-	LatestPrototype  *PrototypeSummary  `json:"latestPrototype,omitempty"`
-	LatestDeployment *DeploymentSummary `json:"latestDeployment,omitempty"`
+	SessionState     string               `json:"sessionState"`
+	GrafanaStack     *domain.GrafanaStack `json:"grafanaStack,omitempty"`
+	LatestPrototype  *PrototypeSummary    `json:"latestPrototype,omitempty"`
+	LatestDeployment *DeploymentSummary   `json:"latestDeployment,omitempty"`
 }
 
 type PrototypeSummary struct {
@@ -511,6 +512,11 @@ func factsWithStatus(brief *domain.LivingBrief, status string) []Fact {
 
 func operationalState(session domain.Session) OperationalState {
 	state := OperationalState{SessionState: session.State}
+	if session.GrafanaStack != nil {
+		stack := *session.GrafanaStack
+		stack.Progress = nil
+		state.GrafanaStack = &stack
+	}
 	if len(session.Prototypes) > 0 {
 		latest := session.Prototypes[0]
 		for _, candidate := range session.Prototypes[1:] {

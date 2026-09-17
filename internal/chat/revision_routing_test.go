@@ -9,6 +9,8 @@ func TestGrafanaResourceOnly(t *testing.T) {
 		want  bool
 	}{
 		{"dashboard", []string{"dashboards/overview.json"}, true},
+		{"legacy single dashboard", []string{"grafana/dashboard.json"}, true},
+		{"datasource", []string{"datasources/cloud.yaml"}, true},
 		{"grafana resources", []string{"grafana/dashboards/overview.json", "grafana/alerts/errors.yaml", "grafana/slos/availability.yml"}, true},
 		{"alerts and slos", []string{"alerts/errors.yaml", "slos/availability.json"}, true},
 		{"normalized manifest", []string{"./dashboards/overview.json"}, true},

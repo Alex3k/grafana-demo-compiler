@@ -44,7 +44,19 @@ func (s *DeploymentService) DeleteSession(ctx context.Context, data *store.Store
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	if err := data.BeginSessionDeletion(ctx, id); err != nil {
+		return err
+	}
+	// Reload after the atomic claim: a stack may have finished provisioning
+	// since the initial lookup, but new stack claims are now blocked.
+	session, err = data.GetSession(ctx, id)
+	if err != nil {
+		return err
+	}
 	expectedSlug := "democompiler" + id[:12]
+	if session.GrafanaStack != nil && session.GrafanaStack.StackSlug != expectedSlug {
+		return fmt.Errorf("recorded stack does not match this session")
+	}
 	roots := map[string]bool{}
 	for _, d := range session.Deployments {
 		if d.StackSlug != expectedSlug {
@@ -64,15 +76,12 @@ func (s *DeploymentService) DeleteSession(ctx context.Context, data *store.Store
 			}
 		}
 	}
-	if err := data.BeginSessionDeletion(ctx, id); err != nil {
-		return err
-	}
 	for path := range roots {
 		if err := cleaner.DeleteLocal(ctx, path, id); err != nil {
 			return fmt.Errorf("delete local demo: %w", err)
 		}
 	}
-	if len(session.Deployments) > 0 {
+	if session.GrafanaStack != nil || len(session.Deployments) > 0 {
 		if err := cleaner.DeleteStack(ctx, expectedSlug); err != nil {
 			return fmt.Errorf("delete Grafana Cloud stack: %w", err)
 		}

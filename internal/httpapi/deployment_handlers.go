@@ -2,6 +2,22 @@ package httpapi
 
 import "net/http"
 
+func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Region string `json:"region"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid stack request", err)
+		return
+	}
+	item, fault := s.deployment.CreateStack(r.Context(), r.PathValue("id"), input.Region)
+	if fault != nil {
+		s.writeFault(w, fault)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, item)
+}
+
 func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Target string `json:"target"`
