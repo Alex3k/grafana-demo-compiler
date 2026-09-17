@@ -289,6 +289,19 @@ func TestParseStackIncludesPrometheusConnection(t *testing.T) {
 	}
 }
 
+func TestParseStackIncludesLokiConnection(t *testing.T) {
+	for _, suffix := range []string{"", "/", "/loki/api/v1/push"} {
+		stack := parseStack([]byte(`{"hlInstanceUrl":"https://logs-prod-036.grafana.net`+suffix+`","hlInstanceId":1792347}`), "demo")
+		if stack.LokiURL != "https://logs-prod-036.grafana.net/loki/api/v1/push" || stack.LokiUsername != "1792347" {
+			t.Fatalf("unexpected Loki connection: %+v", stack)
+		}
+	}
+	stack := parseStack([]byte(`{"hlInstanceUrl":"https://example.com","hlInstanceId":123}`), "demo")
+	if stack.LokiURL != "" {
+		t.Fatal("unexpected Loki endpoint accepted")
+	}
+}
+
 func TestLoadEnvironmentDefaultsSkipsGrafanaAndPlaceholders(t *testing.T) {
 	root := t.TempDir()
 	content := "MYSQL_PASSWORD=demo\nGRAFANA_API_KEY=<token>\nINVALID-KEY=value\n"

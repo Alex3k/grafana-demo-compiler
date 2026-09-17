@@ -3,6 +3,8 @@ package prompts
 import (
 	_ "embed"
 	"strings"
+
+	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
 
 const Version = "v2.6"
@@ -26,7 +28,7 @@ var prototypeBuilder string
 var prototypePlanner string
 
 func Collaborator() string {
-	return combine(sharedConstitution, demoCollaborator)
+	return combine(sharedConstitution, demoCollaborator, "The Demo Compiler manages the generated application's Grafana Cloud telemetry configuration during deployment. Do not ask the human to create telemetry credentials or manually configure Alloy export endpoints. Only claim telemetry is verified when operationalState records verification.")
 }
 
 func Curator() string {
@@ -38,11 +40,11 @@ func Evaluator() string {
 }
 
 func Builder() string {
-	return combine(sharedConstitution, prototypeBuilder)
+	return combine(sharedConstitution, prototypeBuilder, telemetryconfig.Prompt())
 }
 
 func PrototypePlanner() string {
-	return combine(sharedConstitution, prototypePlanner)
+	return combine(sharedConstitution, prototypePlanner, telemetryconfig.Prompt())
 }
 
 func combine(parts ...string) string {

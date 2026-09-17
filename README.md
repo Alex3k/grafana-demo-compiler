@@ -334,6 +334,13 @@ Generated application validation deliberately stays small. It checks:
 
 The generated-file layer separately restricts relative paths, allowed file
 types, file count, total size, and infrastructure directories outside the MVP.
+Telemetry variable names and raw-token authentication formats are shared between
+generation and deployment in `internal/telemetryconfig`. Prototype validation
+reports unsupported Alloy references and missing Compose pass-through for the
+builder to repair. Deployment populates known OTLP, Prometheus, and Loki aliases
+and checks the resolved container environment before starting services. It does
+not print credential values or require manual editing of the demo's `.env`.
+
 Deployment rejects the Grafana Cloud token if Compose exposes it as a build
 argument.
 

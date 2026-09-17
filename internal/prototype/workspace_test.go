@@ -1,10 +1,40 @@
 package prototype
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
+
+func TestValidateReportsTelemetryContractFailure(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.WriteFile("config.alloy", `endpoint = sys.env("GRAFANA_UNKNOWN_SECRET")`); err != nil {
+		t.Fatal(err)
+	}
+	writeCompose(t, root, "services:\n  alloy:\n    image: grafana/alloy:latest\n    env_file: [.env]\n")
+	contractErr := telemetryconfig.Validate(root)
+	if contractErr == nil {
+		t.Fatal("unsupported telemetry variable unexpectedly satisfies telemetry contract")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, check := range workspace.Validate(ctx) {
+		if check.Name == "Telemetry contract" {
+			if check.Status != "failed" || check.Detail != contractErr.Error() {
+				t.Fatalf("telemetry contract failure did not retain repair details: %#v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("workspace validation did not report a telemetry contract check")
+}
 
 func TestComposeContentCheckAllowsNoDatabase(t *testing.T) {
 	root := t.TempDir()

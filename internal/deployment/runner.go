@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
 
 type Stack struct {
@@ -23,6 +25,8 @@ type Stack struct {
 	InstanceID         string
 	PrometheusURL      string
 	PrometheusUsername string
+	LokiURL            string
+	LokiUsername       string
 }
 
 type Runner struct {
@@ -223,6 +227,9 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 	if err := ensureDockerignore(root); err != nil {
 		return err
 	}
+	if err := telemetryconfig.Validate(root); err != nil {
+		return fmt.Errorf("validate telemetry configuration: %w", err)
+	}
 	stackPayload, err := run(ctx, "gcx", "cloud", "stacks", "get", stackSlug, "-o", "json")
 	if err != nil {
 		return fmt.Errorf("read Grafana Cloud metrics connection details: %w", err)
@@ -235,16 +242,16 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 	progress("Writing protected local telemetry configuration")
 	project := "democompiler" + shortAlnum(projectKey, 10)
 	environment := loadEnvironmentDefaults(root)
-	environment["GRAFANA_CLOUD_OTLP_ENDPOINT"] = endpoint
-	environment["GRAFANA_CLOUD_INSTANCE_ID"] = instanceID
-	environment["GRAFANA_CLOUD_API_KEY"] = token
-	environment["GRAFANA_CLOUD_OTLP_USERNAME"] = instanceID
-	environment["GRAFANA_CLOUD_OTLP_PASSWORD"] = token
-	environment["GRAFANA_OTLP_ENDPOINT"] = endpoint
-	environment["GRAFANA_OTLP_USER"] = instanceID
-	environment["GRAFANA_API_KEY"] = token
-	environment["GRAFANA_PROM_URL"] = stack.PrometheusURL
-	environment["GRAFANA_PROM_USER"] = stack.PrometheusUsername
+	for key, value := range telemetryconfig.Environment(telemetryconfig.Connection{
+		OTLPEndpoint: endpoint, InstanceID: instanceID, Token: token,
+		PrometheusURL: stack.PrometheusURL, PrometheusUsername: stack.PrometheusUsername,
+		LokiURL: stack.LokiURL, LokiUsername: stack.LokiUsername,
+	}) {
+		environment[key] = value
+	}
+	if err := telemetryconfig.ValidateEnvironment(root, environment); err != nil {
+		return fmt.Errorf("resolve telemetry configuration: %w", err)
+	}
 	environment["COMPOSE_PROJECT_NAME"] = project
 	keys := make([]string, 0, len(environment))
 	for key := range environment {
@@ -281,9 +288,28 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 	if composeBuildUsesSecret(configuration, token) {
 		return errors.New("Docker Compose build arguments must not contain the Grafana Cloud token")
 	}
+	if err := telemetryconfig.ValidateResolved(root, configuration); err != nil {
+		return fmt.Errorf("validate container telemetry environment: %w", err)
+	}
+	configuration, err = dynamicHostPorts(configuration)
+	if err != nil {
+		return fmt.Errorf("configure local Docker Compose ports: %w", redactError(err, token))
+	}
+	composeFile, err := os.CreateTemp(root, ".env.tmp-compose-*.json")
+	if err != nil {
+		return fmt.Errorf("create local Docker Compose configuration: %w", err)
+	}
+	defer os.Remove(composeFile.Name())
+	if _, err := composeFile.Write(configuration); err != nil {
+		composeFile.Close()
+		return fmt.Errorf("write local Docker Compose configuration: %w", err)
+	}
+	if err := composeFile.Close(); err != nil {
+		return fmt.Errorf("close local Docker Compose configuration: %w", err)
+	}
 
 	progress("Building and starting the local Docker Compose services")
-	if _, err := runIn(ctx, root, "docker", "compose", "up", "-d", "--build"); err != nil {
+	if _, err := runIn(ctx, root, "docker", "compose", "--project-directory", root, "-f", composeFile.Name(), "up", "-d", "--build"); err != nil {
 		return fmt.Errorf("start local Docker Compose application: %w", redactError(err, token))
 	}
 
@@ -541,12 +567,24 @@ func parseStack(payload []byte, slug string) Stack {
 		InstanceID:         firstScalar(value, "id", "instance_id", "instanceId"),
 		PrometheusURL:      firstString(value, "hmInstancePromUrl"),
 		PrometheusUsername: firstScalar(value, "hmInstancePromId"),
+		LokiURL:            firstString(value, "hlInstanceUrl"),
+		LokiUsername:       firstScalar(value, "hlInstanceId"),
 	}
 	if stack.OTLPEndpoint != "" {
 		stack.OTLPEndpoint, _ = validateOTLPEndpoint(stack.OTLPEndpoint)
 	}
 	if stack.URL == "" && slug != "" {
 		stack.URL = "https://" + slug + ".grafana.net"
+	}
+	if stack.LokiURL != "" {
+		parsed, err := url.Parse(strings.TrimRight(stack.LokiURL, "/"))
+		if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+			!strings.HasPrefix(strings.ToLower(parsed.Hostname()), "logs-") || !strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".grafana.net") {
+			stack.LokiURL = ""
+		} else {
+			parsed.Path = strings.TrimSuffix(strings.TrimRight(parsed.Path, "/"), "/loki/api/v1/push") + "/loki/api/v1/push"
+			stack.LokiURL = parsed.String()
+		}
 	}
 	if stack.PrometheusURL != "" {
 		parsed, err := url.Parse(strings.TrimRight(stack.PrometheusURL, "/"))

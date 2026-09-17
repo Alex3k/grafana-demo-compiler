@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
+	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
 
 const (
@@ -102,12 +103,20 @@ func (w *Workspace) Validate(ctx context.Context) []domain.PrototypeCheck {
 		oneOfFileCheck(w.root, "Compose file", "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"),
 		alloyCheck(w.root),
 		composeContentCheck(w.root),
+		telemetryContractCheck(w.root),
 	}
 	checks = append(checks,
 		commandCheck(ctx, w.root, "Go build", "go", "build", "-mod=mod", "./..."),
 		commandCheck(ctx, w.root, "Compose configuration", "docker", "compose", "config", "--quiet"),
 	)
 	return checks
+}
+
+func telemetryContractCheck(root string) domain.PrototypeCheck {
+	if err := telemetryconfig.Validate(root); err != nil {
+		return fail("Telemetry contract", err.Error())
+	}
+	return pass("Telemetry contract", "telemetry configuration satisfies the deployment contract")
 }
 
 func safePath(path string) (string, error) {

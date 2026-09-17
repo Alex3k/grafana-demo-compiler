@@ -3,7 +3,24 @@ package prompts
 import (
 	"strings"
 	"testing"
+
+	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
+
+func TestImplementationPromptsIncludeTelemetryContract(t *testing.T) {
+	contract := strings.TrimSpace(telemetryconfig.Prompt())
+	if contract == "" {
+		t.Fatal("telemetry contract prompt is empty")
+	}
+	for name, prompt := range map[string]string{
+		"builder": Builder(),
+		"planner": PrototypePlanner(),
+	} {
+		if !strings.Contains(prompt, contract) {
+			t.Fatalf("%s prompt does not include the telemetry contract", name)
+		}
+	}
+}
 
 func TestRolePromptsIncludeSharedConstitution(t *testing.T) {
 	for name, prompt := range map[string]string{
