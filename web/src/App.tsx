@@ -231,12 +231,12 @@ function App() {
     }
   }
 
-  async function deployLocal(organization: string, region: string) {
+  async function deployLocal(region: string) {
     if (!active || deploymentBusy) return;
     const sessionId = active.id;
     setError("");
     try {
-      const deployment = await api.createDeployment(sessionId, organization, region);
+      const deployment = await api.createDeployment(sessionId, region);
       setActive((current) => current && current.id === sessionId
         ? { ...current, deployments: [deployment, ...(current.deployments ?? []).filter((item) => item.id !== deployment.id)] }
         : current);
@@ -372,7 +372,7 @@ function App() {
           prototypeBusy={prototypeBusy}
           prototypeProgress={prototypeActivity[prototypeActivity.length - 1] ?? ""}
           onBuildPrototype={() => void buildPrototype()}
-          onDeployLocal={(organization, region) => void deployLocal(organization, region)}
+          onDeployLocal={(region) => void deployLocal(region)}
           onSubmitTelemetryToken={(deploymentId, token) => void submitTelemetryToken(deploymentId, token)}
         />
         {topicThread && active && (
@@ -567,7 +567,7 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
   );
 }
 
-function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (organization: string, region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => void }) {
+function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => void }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
@@ -709,8 +709,7 @@ function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: L
   </div>;
 }
 
-function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { session: Session; deployment?: Deployment; onDeploy: (organization: string, region: string) => void; onSubmitToken: (deploymentId: string, token: string) => void }) {
-  const [organization, setOrganization] = useState("");
+function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { session: Session; deployment?: Deployment; onDeploy: (region: string) => void; onSubmitToken: (deploymentId: string, token: string) => void }) {
   const [region, setRegion] = useState("");
   const [token, setToken] = useState("");
   const busy = deployment && ["provisioning", "starting", "verifying"].includes(deployment.status);
@@ -718,9 +717,7 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
   const stackSlug = `democompiler${session.id.slice(0, 12).toLowerCase()}`;
   const stackName = `${session.title} demo ${session.id.slice(0, 12)}`;
   const progress = deployment?.progress?.at(-1);
-  const tokenHelp = deployment?.instanceId
-    ? `https://grafana.com/orgs/${encodeURIComponent(deployment.organization)}/stacks/${encodeURIComponent(deployment.instanceId)}/otlp-info`
-    : "https://grafana.com";
+	const tokenHelp = deployment?.stackUrl ? `${deployment.stackUrl.replace(/\/$/, "")}/a/grafana-auth-app` : "https://grafana.com";
 
   return <section className={`deployment-card status-${deployment?.status ?? "ready"}`}>
     <span>LOCAL DEPLOYMENT</span>
@@ -731,14 +728,13 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
 
     {canRetry && <form className="deployment-form" onSubmit={(event) => {
       event.preventDefault();
-      if (organization.trim() && region.trim()) onDeploy(organization.trim(), region.trim());
-    }}>
-      <label>Grafana Cloud organization<input value={organization} onChange={(event) => setOrganization(event.target.value)} placeholder="organization slug" autoComplete="off" /></label>
-      <label>Grafana Cloud region<input value={region} onChange={(event) => setRegion(event.target.value)} placeholder="for example prod-gb-south-0" autoComplete="off" /></label>
+		if (region.trim()) onDeploy(region.trim());
+	}}>
+		<label>Grafana Cloud region<input value={region} onChange={(event) => setRegion(event.target.value)} placeholder="for example prod-gb-south-0" autoComplete="off" /></label>
       <div className="deployment-confirm"><small>Application target</small><strong>Local Docker Compose only</strong></div>
       <div className="deployment-confirm"><small>Stack name</small><strong>{stackName}</strong></div>
       <div className="deployment-confirm"><small>New stack</small><code>{stackSlug}.grafana.net</code></div>
-      <button type="submit" disabled={!organization.trim() || !region.trim()}>Create stack and deploy locally</button>
+		<button type="submit" disabled={!region.trim()}>Create stack and deploy locally</button>
       <small>Creating a Grafana Cloud stack may incur usage costs. Delete protection remains enabled.</small>
     </form>}
 

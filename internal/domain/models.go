@@ -19,7 +19,6 @@ type Deployment struct {
 	SessionID            string    `json:"sessionId"`
 	PrototypeIterationID string    `json:"prototypeIterationId"`
 	Target               string    `json:"target"`
-	Organization         string    `json:"organization"`
 	Region               string    `json:"region"`
 	StackName            string    `json:"stackName"`
 	StackSlug            string    `json:"stackSlug"`

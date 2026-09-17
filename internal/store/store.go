@@ -142,7 +142,6 @@ CREATE TABLE IF NOT EXISTS deployments (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   prototype_iteration_id TEXT NOT NULL REFERENCES prototype_iterations(id) ON DELETE CASCADE,
   target TEXT NOT NULL CHECK (target = 'local'),
-  organization TEXT NOT NULL,
   region TEXT NOT NULL,
   stack_name TEXT NOT NULL,
   stack_slug TEXT NOT NULL,
@@ -191,6 +190,18 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES (7);
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)`); err != nil {
 		return fmt.Errorf("record prototype progress migration: %w", err)
+	}
+	var organizationColumnCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('deployments') WHERE name = 'organization'`).Scan(&organizationColumnCount); err != nil {
+		return fmt.Errorf("inspect deployment organization schema: %w", err)
+	}
+	if organizationColumnCount > 0 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE deployments DROP COLUMN organization`); err != nil {
+			return fmt.Errorf("remove deployment organization: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)`); err != nil {
+		return fmt.Errorf("record deployment organization migration: %w", err)
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
@@ -290,8 +301,8 @@ func (s *Store) CreateDeployment(ctx context.Context, deployment domain.Deployme
 		return domain.Deployment{}, fmt.Errorf("encode deployment progress: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO deployments(id, session_id, prototype_iteration_id, target, organization, region, stack_name, stack_slug, status, progress, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, deployment.ID, deployment.SessionID, deployment.PrototypeIterationID, deployment.Target, deployment.Organization, deployment.Region, deployment.StackName, deployment.StackSlug, deployment.Status, string(progress), formatTime(now), formatTime(now))
+INSERT INTO deployments(id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, status, progress, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, deployment.ID, deployment.SessionID, deployment.PrototypeIterationID, deployment.Target, deployment.Region, deployment.StackName, deployment.StackSlug, deployment.Status, string(progress), formatTime(now), formatTime(now))
 	if err != nil {
 		return domain.Deployment{}, fmt.Errorf("create deployment: %w", err)
 	}
@@ -322,14 +333,14 @@ WHERE id = ? AND session_id = ?`, deployment.StackURL, deployment.OTLPEndpoint, 
 
 func (s *Store) GetDeployment(ctx context.Context, sessionID, deploymentID string) (domain.Deployment, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT id, session_id, prototype_iteration_id, target, organization, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
+SELECT id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
 FROM deployments WHERE id = ? AND session_id = ?`, deploymentID, sessionID)
 	return scanDeployment(row)
 }
 
 func (s *Store) ListDeployments(ctx context.Context, sessionID string) ([]domain.Deployment, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, session_id, prototype_iteration_id, target, organization, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
+SELECT id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
 FROM deployments WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list deployments: %w", err)
@@ -833,7 +844,7 @@ func scanDeployment(row scanner) (domain.Deployment, error) {
 	var progress, created, updated string
 	if err := row.Scan(
 		&deployment.ID, &deployment.SessionID, &deployment.PrototypeIterationID,
-		&deployment.Target, &deployment.Organization, &deployment.Region,
+		&deployment.Target, &deployment.Region,
 		&deployment.StackName, &deployment.StackSlug, &deployment.StackURL,
 		&deployment.OTLPEndpoint, &deployment.InstanceID, &deployment.Status, &progress, &deployment.Error,
 		&created, &updated,

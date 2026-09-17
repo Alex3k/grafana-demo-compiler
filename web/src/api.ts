@@ -36,10 +36,10 @@ export const api = {
     }),
   createPrototype: (sessionId: string) =>
     json<PrototypeIteration>(`/api/sessions/${sessionId}/prototypes`, { method: "POST" }),
-  createDeployment: (sessionId: string, organization: string, region: string) =>
+  createDeployment: (sessionId: string, region: string) =>
     json<Deployment>(`/api/sessions/${sessionId}/deployments`, {
       method: "POST",
-      body: JSON.stringify({ target: "local", organization, region }),
+      body: JSON.stringify({ target: "local", region }),
     }),
   configureDeploymentToken: (sessionId: string, deploymentId: string, token: string) =>
     json<Deployment>(`/api/sessions/${sessionId}/deployments/${deploymentId}/token`, {

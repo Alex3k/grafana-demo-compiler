@@ -27,7 +27,6 @@ export interface Deployment {
   sessionId: string;
   prototypeIterationId: string;
   target: "local";
-  organization: string;
   region: string;
   stackName: string;
   stackSlug: string;

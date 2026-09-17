@@ -23,28 +23,28 @@ type Runner struct{}
 
 func New() *Runner { return &Runner{} }
 
-func (r *Runner) Provision(ctx context.Context, organization, region, name, slug string, progress func(string)) (Stack, error) {
-	if strings.TrimSpace(organization) == "" || strings.TrimSpace(region) == "" {
-		return Stack{}, errors.New("Grafana Cloud organization and region are required")
+func (r *Runner) Provision(ctx context.Context, region, name, slug string, progress func(string)) (Stack, error) {
+	if strings.TrimSpace(region) == "" {
+		return Stack{}, errors.New("Grafana Cloud region is required")
 	}
 	if !validSlug(slug) {
 		return Stack{}, errors.New("generated stack slug is invalid")
 	}
 
-	progress("Checking gcx Cloud authentication and organization access")
-	stacks, err := run(ctx, "gcx", "cloud", "stacks", "list", "--org", organization, "-o", "json")
-	if err != nil {
-		return Stack{}, fmt.Errorf("gcx Cloud preflight failed: %w", err)
-	}
-	exists := jsonContainsString(stacks, slug)
-
-	progress("Checking that the selected Grafana Cloud region is available")
+	progress("Checking gcx Cloud authentication and the selected region")
 	regions, err := run(ctx, "gcx", "cloud", "stacks", "list-regions", "-o", "json")
 	if err != nil {
 		return Stack{}, fmt.Errorf("list Grafana Cloud regions: %w", err)
 	}
 	if !jsonContainsString(regions, region) {
 		return Stack{}, fmt.Errorf("Grafana Cloud region %q is not available", region)
+	}
+
+	progress("Checking for this session's existing Grafana Cloud stack")
+	_, getErr := run(ctx, "gcx", "cloud", "stacks", "get", slug, "-o", "json")
+	exists := getErr == nil
+	if getErr != nil && !isNotFound(getErr) {
+		return Stack{}, fmt.Errorf("check Grafana Cloud stack: %w", getErr)
 	}
 
 	if exists {
@@ -84,6 +84,11 @@ func (r *Runner) Provision(ctx context.Context, organization, region, name, slug
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+func isNotFound(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") || strings.Contains(message, "404")
 }
 
 func (r *Runner) StartLocal(ctx context.Context, root, endpoint, instanceID, token, deploymentID string, progress func(string)) error {

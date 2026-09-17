@@ -56,23 +56,21 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 
 func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Target       string `json:"target"`
-		Organization string `json:"organization"`
-		Region       string `json:"region"`
+		Target string `json:"target"`
+		Region string `json:"region"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid deployment request", err)
 		return
 	}
 	input.Target = strings.TrimSpace(strings.ToLower(input.Target))
-	input.Organization = strings.TrimSpace(input.Organization)
 	input.Region = strings.TrimSpace(input.Region)
 	if input.Target != "local" {
 		s.writeError(w, http.StatusUnprocessableEntity, "This MVP only deploys application services locally with Docker Compose", nil)
 		return
 	}
-	if input.Organization == "" || input.Region == "" {
-		s.writeError(w, http.StatusBadRequest, "Grafana Cloud organization and region are required", nil)
+	if input.Region == "" {
+		s.writeError(w, http.StatusBadRequest, "Grafana Cloud region is required", nil)
 		return
 	}
 	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
@@ -103,7 +101,7 @@ func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
 	stackName := session.Title + " demo " + shortID
 	item, err := s.store.CreateDeployment(r.Context(), domain.Deployment{
 		SessionID: session.ID, PrototypeIterationID: prototype.ID,
-		Target: "local", Organization: input.Organization, Region: input.Region,
+		Target: "local", Region: input.Region,
 		StackName: stackName, StackSlug: stackSlug, Status: "provisioning",
 		Progress: []string{"Deployment accepted: local Docker Compose only"},
 	})
@@ -138,7 +136,7 @@ func (s *Server) runStackProvisioning(item domain.Deployment) {
 			s.log.Error("save deployment progress", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
 		}
 	}
-	stack, err := s.deployment.Provision(ctx, item.Organization, item.Region, item.StackName, item.StackSlug, appendProgress)
+	stack, err := s.deployment.Provision(ctx, item.Region, item.StackName, item.StackSlug, appendProgress)
 	if err != nil {
 		item.Status = "failed"
 		item.Error = err.Error()
