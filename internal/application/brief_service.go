@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
@@ -162,8 +163,17 @@ func (s *BriefService) ConfirmThread(ctx context.Context, sessionID, threadID st
 
 func (s *BriefService) UpdateLivingBrief(ctx context.Context, session domain.Session, sink EventSink, parentGenerationIDs ...string) {
 	defer func() { _ = emit(sink, "turn_completed", map[string]string{"sessionId": session.ID}) }()
-	activity, _ := s.store.CreateMessage(ctx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Updating the living demo brief", Status: "complete"})
+	activity, _ := s.store.CreateMessage(ctx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Checking for brief changes", Status: "streaming"})
 	_ = emit(sink, "activity", activity)
+	activity.Content, activity.Status = "Brief update failed", "failed"
+	defer func() {
+		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if activity.ID != "" {
+			_ = s.store.UpdateMessage(persistCtx, activity.ID, activity.Content, activity.Status)
+			_ = emit(sink, "activity", activity)
+		}
+	}()
 	operation, err := s.store.CreateOperation(ctx, domain.Operation{SessionID: session.ID, Kind: "living_brief_update", Status: "running", Summary: "Extracting decisions, narrative, and architecture"})
 	if err != nil {
 		s.log.Error("could not start living brief update", "session", session.ID, "error", err)
@@ -177,6 +187,14 @@ func (s *BriefService) UpdateLivingBrief(ctx context.Context, session domain.Ses
 	if err == nil {
 		var result chat.BriefResult
 		result, err = s.chat.BuildBrief(ctx, session, messages, parentGenerationIDs...)
+		if err == nil && result.Unchanged && session.Brief != nil {
+			err = s.store.AdvanceBriefCursor(ctx, session.ID, session.Brief.Version, latestConversationalMessageID(messages))
+			if err == nil {
+				activity.Content, activity.Status = "Brief unchanged", "complete"
+				_ = s.store.FinishOperation(ctx, operation.ID, "complete", "Brief unchanged", "")
+				return
+			}
+		}
 		if err == nil {
 			content := result.Content
 			if content.Acceptance.Accepted {
@@ -196,6 +214,7 @@ func (s *BriefService) UpdateLivingBrief(ctx context.Context, session domain.Ses
 				var brief domain.LivingBrief
 				brief, err = s.store.SaveBriefWithCursor(ctx, session.ID, latestConversationalMessageID(messages), content)
 				if err == nil {
+					activity.Content, activity.Status = "Living brief updated", "complete"
 					s.updateSessionState(ctx, session, content, sink)
 					_ = s.store.FinishOperation(ctx, operation.ID, "complete", "Living brief updated", "")
 					_ = emit(sink, "brief_updated", brief)

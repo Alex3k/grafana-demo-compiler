@@ -88,6 +88,7 @@ button { color: inherit; }
 .message-status { margin-top: 8px; color: #f2a3a3; font-size: 11px; }
 .activity { display: flex; align-items: center; gap: 8px; margin: -5px 0 23px 46px; color: #837f8c; font-size: 11px; }
 .activity-pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--purple); box-shadow: 0 0 9px var(--purple); animation: pulse 1.6s infinite; }
+.activity-marker { width: 7px; height: 7px; border-radius: 50%; background: #837f8c; }
 .typing::after { content: "…"; animation: fade 1s infinite; }
 .error-banner { margin: 0 max(28px, calc((100% - 760px) / 2)) 10px; border: 1px solid rgba(251, 98, 98, .35); background: rgba(96, 31, 40, .24); border-radius: 8px; padding: 9px 12px; color: #f4b7bb; font-size: 12px; }
 .build-activity { max-height: 210px; overflow-y: auto; margin: 0 max(22px, calc((100% - 780px) / 2)) 10px; border: 1px solid rgba(150, 104, 255, .4); border-radius: 11px; padding: 12px 14px; background: linear-gradient(145deg, rgba(150,104,255,.12), rgba(23,23,30,.96)); box-shadow: 0 10px 34px rgba(0, 0, 0, .28); }

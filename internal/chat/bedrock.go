@@ -49,6 +49,7 @@ type Result struct {
 type BriefResult struct {
 	Content      domain.BriefContent
 	GenerationID string
+	Unchanged    bool
 }
 
 type EvaluationResult struct {
@@ -357,11 +358,29 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 	}
 
 	var candidate *domain.BriefContent
+	unchanged := false
+	noChangeTool, err := aisdk.TypedTool(aisdk.TypedToolDef[struct{}, briefUpdateReceipt]{
+		Name:        "keep_brief_unchanged",
+		Description: "Keep the existing brief unchanged when the exchange only recalls, explains, or illustrates existing decisions and introduces no new requirements or planning decisions.",
+		Execute: func(_ context.Context, _ struct{}, _ aisdk.ToolExecutionOptions) (briefUpdateReceipt, error) {
+			if session.Brief == nil || candidate != nil {
+				return briefUpdateReceipt{}, errors.New("no existing brief or an update was already proposed")
+			}
+			unchanged = true
+			return briefUpdateReceipt{Status: "unchanged"}, nil
+		},
+	})
+	if err != nil {
+		return BriefResult{}, fmt.Errorf("create unchanged brief tool: %w", err)
+	}
 	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[briefUpdateProposal, briefUpdateReceipt]{
 		Name:        briefUpdateTool,
 		Title:       "Propose living brief update",
 		Description: "Submit the complete proposed living brief. This records a draft only; it cannot confirm human decisions or overwrite locked confirmed topics.",
 		Execute: func(_ context.Context, proposal briefUpdateProposal, _ aisdk.ToolExecutionOptions) (briefUpdateReceipt, error) {
+			if unchanged {
+				return briefUpdateReceipt{}, errors.New("brief was already marked unchanged")
+			}
 			content := normalizeBrief(proposal.content())
 			if session.Brief != nil {
 				content = preserveConfirmedBrief(session.Brief.Content, content)
@@ -378,8 +397,8 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Curator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
-		aisdk.WithTools(aisdk.ToolSet{briefUpdateTool: tool}),
-		aisdk.WithToolChoice(provider.ToolChoice{Type: provider.ToolChoiceTool, ToolName: briefUpdateTool}),
+		aisdk.WithTools(aisdk.ToolSet{briefUpdateTool: tool, "keep_brief_unchanged": noChangeTool}),
+		aisdk.WithToolChoice(provider.ToolChoice{Type: provider.ToolChoiceRequired}),
 		aisdk.WithStopWhen(aisdk.StepCountIs(1)),
 		aisdk.WithMaxOutputTokens(6000),
 		aisdk.WithMaxRetries(1),
@@ -391,6 +410,9 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 	}
 	if err := stream.Err(); err != nil {
 		return BriefResult{}, fmt.Errorf("generate living brief: %w", err)
+	}
+	if unchanged && candidate == nil {
+		return BriefResult{Unchanged: true, GenerationID: generationID}, nil
 	}
 	if candidate == nil {
 		return BriefResult{}, fmt.Errorf("generate living brief: model did not call %s", briefUpdateTool)

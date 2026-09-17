@@ -463,7 +463,7 @@ function Conversation({ messages, containerRef, onScrollPositionChange }: { mess
   return (
     <section className="conversation" ref={containerRef} onScroll={(event) => trackScroll(event.currentTarget)}>
       {messages.map((message) => message.kind === "activity" ? (
-        <div className="activity" key={message.id}><span className="activity-pulse" />{message.content}</div>
+        <div className="activity" key={message.id}><span className={message.status === "streaming" ? "activity-pulse" : "activity-marker"} />{message.content}</div>
       ) : (
         <article className={`message message-${message.role}`} key={message.id}>
           <div className="avatar">{message.role === "user" ? "You" : "G"}</div>
@@ -545,7 +545,7 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
       <div className="topic-thread" ref={threadRef}>
         {!messages.length && <div className="topic-empty"><strong>What would you like to change?</strong><p>Respond to this topic, challenge the proposal, or add missing context.</p></div>}
         {messages.map((message) => message.kind === "activity" ? (
-          <div className="topic-activity" key={message.id}><span className="activity-pulse" />{message.content}</div>
+          <div className="topic-activity" key={message.id}><span className={message.status === "streaming" ? "activity-pulse" : "activity-marker"} />{message.content}</div>
         ) : (
           <article className={`topic-message topic-message-${message.role}`} key={message.id}>
             <span>{message.role === "user" ? "You" : "Demo Compiler"}</span>

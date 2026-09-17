@@ -643,6 +643,13 @@ func (s *Store) SaveBriefWithCursor(ctx context.Context, sessionID, sourceMessag
 	return domain.LivingBrief{Version: version, SourceMessageID: sourceMessageID, UpdatedAt: now, Content: content}, nil
 }
 
+// AdvanceBriefCursor records processed conversation without creating a revision.
+// A concurrent revision must not have its cursor overwritten by this snapshot.
+func (s *Store) AdvanceBriefCursor(ctx context.Context, sessionID string, version int, sourceMessageID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE living_briefs SET source_message_id = ? WHERE session_id = ? AND version = ? AND version = (SELECT MAX(version) FROM living_briefs WHERE session_id = ?)`, sourceMessageID, sessionID, version, sessionID)
+	return err
+}
+
 func (s *Store) GetBrief(ctx context.Context, sessionID string) (domain.LivingBrief, error) {
 	var brief domain.LivingBrief
 	var payload, updated string

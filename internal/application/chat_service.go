@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
@@ -55,7 +56,7 @@ func (s *ChatService) PrepareTurn(ctx context.Context, sessionID, content string
 			session.Title = title
 		}
 	}
-	activity, _ := s.store.CreateMessage(ctx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Understanding your demo request", Status: "complete"})
+	activity, _ := s.store.CreateMessage(ctx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Understanding your demo request", Status: "streaming"})
 	operation, err := s.store.CreateOperation(ctx, domain.Operation{SessionID: session.ID, Kind: "bedrock_generation", Status: "running", Summary: "Waiting for the assistant"})
 	if err != nil {
 		return PreparedChatTurn{}, fault(FaultInternal, "Could not start assistant operation", err)
@@ -68,7 +69,18 @@ func (s *ChatService) PrepareTurn(ctx context.Context, sessionID, content string
 	return PreparedChatTurn{Session: session, UserMessage: user, Activity: activity, Operation: operation, AssistantMessage: assistant}, nil
 }
 
-func (s *ChatService) RunTurn(ctx context.Context, turn PreparedChatTurn, sink EventSink) error {
+func (s *ChatService) RunTurn(ctx context.Context, turn PreparedChatTurn, sink EventSink) (turnErr error) {
+	defer func() {
+		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		turn.Activity.Status = "complete"
+		turn.Activity.Content = "Assistant turn finished"
+		if turnErr != nil {
+			turn.Activity.Status, turn.Activity.Content = "failed", "Assistant turn interrupted"
+		}
+		_ = s.store.UpdateMessage(persistCtx, turn.Activity.ID, turn.Activity.Content, turn.Activity.Status)
+		_ = emit(sink, "activity", turn.Activity)
+	}()
 	_ = emit(sink, "user_message", turn.UserMessage)
 	_ = emit(sink, "activity", turn.Activity)
 	_ = emit(sink, "message_started", turn.AssistantMessage)
