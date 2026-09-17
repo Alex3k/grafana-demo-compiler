@@ -75,8 +75,14 @@ type PrototypeResult struct {
 }
 
 type prototypeBuildPlan struct {
-	Title                string                   `json:"title"`
-	Contract             prototypeContract        `json:"demoContract"`
+	Title    string            `json:"title"`
+	Contract prototypeContract `json:"demoContract"`
+	prototypePlanDraft
+}
+
+// Only new implementation decisions are generated. The backend attaches the
+// authoritative title and brief contract before passing the plan to the builder.
+type prototypePlanDraft struct {
 	Summary              string                   `json:"summary"`
 	Decisions            []prototypeDecision      `json:"decisions"`
 	AlternativesRejected []prototypeAlternative   `json:"alternativesRejected"`
@@ -623,7 +629,7 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	var err error
 	if session.Revision != nil {
 		// A targeted revision uses the approved request and unchanged brief, not a new architecture plan.
-		plan = prototypeBuildPlan{Title: session.Title, Contract: prototypeContractFromBrief(session.Brief.Content), Summary: session.Revision.Goal}
+		plan = prototypeBuildPlan{Title: session.Title, Contract: prototypeContractFromBrief(session.Brief.Content), prototypePlanDraft: prototypePlanDraft{Summary: session.Revision.Goal}}
 		for _, path := range session.Revision.Files {
 			plan.Files = append(plan.Files, prototypeFilePlan{Path: path, Purpose: session.Revision.Goal})
 		}
@@ -807,12 +813,12 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 		return prototypeBuildPlan{}, "", fmt.Errorf("encode prototype planning context: %w", err)
 	}
 	var plan prototypeBuildPlan
-	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypeBuildPlan, prototypePlanReceipt]{
+	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypePlanDraft, prototypePlanReceipt]{
 		Name:        recordPrototypePlanTool,
 		Title:       "Record prototype implementation plan",
 		Description: "Record the complete, auditable implementation decision record before prototype files are written.",
-		Execute: func(_ context.Context, input prototypeBuildPlan, _ aisdk.ToolExecutionOptions) (prototypePlanReceipt, error) {
-			plan = input
+		Execute: func(_ context.Context, input prototypePlanDraft, _ aisdk.ToolExecutionOptions) (prototypePlanReceipt, error) {
+			plan.prototypePlanDraft = input
 			return prototypePlanReceipt{Status: "recorded", FileCount: len(input.Files)}, nil
 		},
 	})
@@ -825,7 +831,7 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
 		aisdk.WithTools(aisdk.ToolSet{recordPrototypePlanTool: tool}),
 		aisdk.WithStopWhen(aisdk.StepCountIs(1)),
-		aisdk.WithMaxOutputTokens(6000),
+		aisdk.WithMaxOutputTokens(12000),
 		aisdk.WithMaxRetries(1),
 	)
 	for part := range stream.FullStream() {
@@ -846,6 +852,7 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 
 func (s *Service) builderBudgetGuard(sessionID string) aisdk.PrepareStepFunc {
 	config := s.configForPrompt(appPrompts.Builder(), 3000)
+	config.MaxInputTokens = 128_000
 	return func(state aisdk.PrepareStepState) (*aisdk.PrepareStepResult, error) {
 		messages, err := json.Marshal(state.Messages)
 		if err != nil {

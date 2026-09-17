@@ -32,6 +32,10 @@ func TestBuilderMeterReportsGrowingTranscriptAndOverflow(t *testing.T) {
 	}
 	initial := s.ContextUsage("session")[0].EstimatedTokens
 	_, err := guard(aisdk.PrepareStepState{Messages: []provider.Message{provider.UserText(strings.Repeat("x", 120000))}})
+	if err != nil || s.ContextUsage("session")[0].MaxInputTokens != 128000 {
+		t.Fatalf("builder should accept context above the old 32k limit: %v", err)
+	}
+	_, err = guard(aisdk.PrepareStepState{Messages: []provider.Message{provider.UserText(strings.Repeat("x", 400000))}})
 	got := s.ContextUsage("session")[0]
 	if !contextengine.IsBudgetOverflow(err) || got.EstimatedTokens <= initial || got.EstimatedTokens <= got.MaxInputTokens {
 		t.Fatalf("usage=%#v error=%v", got, err)

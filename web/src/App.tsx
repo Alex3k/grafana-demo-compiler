@@ -445,7 +445,7 @@ function App() {
 
 function BuildActivity({ steps, detailed, onToggle }: { steps: string[]; detailed: boolean; onToggle: () => void }) {
   const visibleSteps = detailed ? steps : steps.slice(-1);
-  return <section className="build-activity" aria-live="polite">
+  return <section className={`build-activity${detailed ? " is-expanded" : ""}`} aria-live="polite">
     <div className="build-activity-header"><span className="activity-pulse" /><div><strong>Building your demo</strong><small>{detailed ? "Milestones, tool activity, and validation" : "Current build status"}</small></div><button type="button" onClick={onToggle}>{detailed ? "Hide details" : "Show details"}</button></div>
     <ol>{visibleSteps.map((step, index) => {
       const active = !detailed || index === visibleSteps.length - 1;
