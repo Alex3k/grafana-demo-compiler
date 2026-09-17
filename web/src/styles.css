@@ -190,16 +190,25 @@ button { color: inherit; }
 .prototype-progress .activity-pulse { flex: 0 0 auto; }
 .prototype-result { margin-top: 10px; border-top: 1px solid #2f3433; padding-top: 9px; }
 .prototype-result > strong { display: block; color: #d7d3dc; font-size: 10px; text-transform: capitalize; }
+.prototype-result-summary { color: #a9e8c9 !important; }
 .prototype-result.result-failed > strong, .prototype-error { color: #f2a3a3 !important; }
 .prototype-result details { margin-top: 8px; color: #918d99; font-size: 9px; }
 .prototype-result summary { cursor: pointer; }
+.prototype-implementation > div { max-height: 360px; overflow: auto; margin-top: 7px; border: 1px solid #302e38; border-radius: 7px; padding: 9px; background: #111116; color: #c8c3ce; }
+.prototype-implementation h1, .prototype-implementation h2, .prototype-implementation h3 { margin: 10px 0 5px; color: #eeeaf2; font-size: 11px; }
+.prototype-implementation h1:first-child, .prototype-implementation h2:first-child, .prototype-implementation h3:first-child { margin-top: 0; }
+.prototype-implementation p { font-size: 9px; }
+.prototype-implementation ul, .prototype-implementation ol { margin: 6px 0; padding-left: 16px; }
+.prototype-implementation table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.prototype-implementation th, .prototype-implementation td { border: 1px solid #34323c; padding: 4px 5px; text-align: left; vertical-align: top; }
+.prototype-implementation pre { max-width: 100%; overflow-x: auto; }
 .prototype-result ul { display: grid; gap: 6px; margin: 7px 0 0; padding: 0; list-style: none; }
 .prototype-result li strong, .prototype-result li span { display: block; }
 .prototype-result li span { margin-top: 2px; color: #777481; overflow-wrap: anywhere; }
 .prototype-result li.check-passed strong { color: #72dca8; }
 .prototype-result li.check-failed strong { color: #f2a3a3; }
 .prototype-result code { color: #c9b6e7; overflow-wrap: anywhere; }
-.prototype-path { overflow-wrap: anywhere; }
+.prototype-path code { display: block; margin-top: 6px; color: #8f8997; overflow-wrap: anywhere; }
 .alignment-card strong { display: block; margin-top: 5px; font-size: 11px; text-transform: capitalize; }
 .alignment-card.result-does_not_meet { border-color: rgba(251,98,98,.4); }
 .topic-chat { position: fixed; z-index: 45; top: 58px; right: 0; bottom: 0; display: flex; flex-direction: column; width: min(480px, calc(100vw - 24px)); border-left: 1px solid #3b3546; background: #101015; box-shadow: -24px 0 70px rgba(0,0,0,.55); }

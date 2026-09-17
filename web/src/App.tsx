@@ -638,11 +638,12 @@ function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: L
     {busy && <small className="prototype-progress"><span className="activity-pulse" />{progress}</small>}
     {iteration && <div className={`prototype-result result-${iteration.status}`}>
       <strong>Iteration {iteration.number} · {iteration.status}</strong>
-      {iteration.summary && <p>{iteration.summary}</p>}
+      {iteration.status === "complete" && <p className="prototype-result-summary">Prototype generated and validated.</p>}
       <small>{artifacts.length} files · {checks.filter((check) => check.status === "passed").length}/{checks.length} checks passed</small>
       {iteration.error && <small className="prototype-error">{iteration.error}</small>}
+      {iteration.summary && <details className="prototype-implementation"><summary>Implementation details</summary><div><Markdown remarkPlugins={[remarkGfm]} skipHtml>{iteration.summary}</Markdown></div></details>}
       <details><summary>Validation and files</summary><ul>{checks.map((check) => <li key={check.name} className={`check-${check.status}`}><strong>{check.name}</strong><span>{check.detail}</span></li>)}{artifacts.map((artifact) => <li key={artifact.path}><code>{artifact.path}</code></li>)}</ul></details>
-      <small className="prototype-path">Saved at {iteration.rootPath}</small>
+      {iteration.rootPath && <details className="prototype-path"><summary>Local output path</summary><code>{iteration.rootPath}</code></details>}
     </div>}
   </div>;
 }
