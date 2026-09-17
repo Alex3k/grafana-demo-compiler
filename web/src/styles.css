@@ -28,9 +28,9 @@ button { color: inherit; }
 .layout-button, .icon-button { border: 1px solid var(--border); background: #15151b; border-radius: 8px; padding: 7px 11px; font-size: 12px; cursor: pointer; }
 .layout-button:hover, .icon-button:hover { border-color: #454451; background: #1b1b23; }
 
-.shell { height: calc(100vh - 58px); display: grid; grid-template-columns: 246px minmax(420px, 1fr) 340px; }
+.shell { height: calc(100vh - 58px); display: grid; grid-template-columns: 246px minmax(420px, 1fr) 340px; grid-template-rows: minmax(0, 1fr); }
 .sidebar, .context-rail { min-width: 0; background: rgba(16, 16, 21, .88); }
-.sidebar { padding: 16px 12px; border-right: 1px solid var(--border); }
+.sidebar { padding: 16px 12px; border-right: 1px solid var(--border); overflow-y: auto; }
 .context-rail { padding: 23px 18px; border-left: 1px solid var(--border); overflow-y: auto; }
 .new-demo { width: 100%; border: 1px solid rgba(255, 109, 58, .6); background: linear-gradient(135deg, rgba(255, 109, 58, .2), rgba(150, 104, 255, .13)); border-radius: 9px; padding: 10px 12px; text-align: left; font-weight: 600; cursor: pointer; }
 .new-demo:hover { border-color: var(--orange); }
@@ -50,12 +50,12 @@ button { color: inherit; }
 .status-dot.bad { background: #fb6262; }
 .empty-copy { padding: 6px 10px; color: var(--muted); font-size: 12px; }
 
-.workspace { display: grid; min-width: 0; min-height: 0; overflow: hidden; grid-template-rows: auto minmax(0, 1fr) auto auto; background: rgba(9, 9, 12, .55); }
+.workspace { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; overflow: hidden; background: rgba(9, 9, 12, .55); }
 .session-header { display: flex; align-items: center; justify-content: space-between; min-height: 86px; padding: 14px 28px; border-bottom: 1px solid var(--border); }
 .session-header .eyebrow { margin: 0 0 5px; }
 .session-header h1 { margin: 0; max-width: 700px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; font-weight: 700; }
 .state-pill { border: 1px solid #3c3946; background: #191820; border-radius: 999px; padding: 5px 10px; color: #bbb7c7; font-size: 11px; }
-.conversation { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: #45414e transparent; scrollbar-width: thin; padding: 26px max(28px, calc((100% - 760px) / 2)); }
+.conversation { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; scrollbar-color: #45414e transparent; scrollbar-width: thin; padding: 26px max(28px, calc((100% - 760px) / 2)); }
 .conversation::-webkit-scrollbar { width: 9px; }
 .conversation::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #45414e; background-clip: padding-box; }
 .conversation.welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
