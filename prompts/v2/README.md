@@ -21,11 +21,13 @@ application guard is deferred and described in `local-deployment-guard.md`.
 
 For an ordinary planning turn:
 
-1. Send the shared constitution, collaborator prompt, current brief, and
-   conversation to the Demo Collaborator.
+1. Send the shared constitution, collaborator prompt, confirmed and proposed
+   brief facts, compact operational state, and bounded recent conversation to
+   the Demo Collaborator.
 2. Stream only the collaborator response to the human.
-3. Send the shared constitution, curator prompt, current brief, and completed
-   conversation to the Living Brief Curator.
+3. Send the shared constitution, curator prompt, current brief content, and
+   completed messages since the previous brief cursor to the Living Brief
+   Curator.
 4. Persist the curator output as a new immutable brief version.
 
 When the human explicitly accepts the current plan:
@@ -45,8 +47,8 @@ role instructions:
 ```text
 <session_context>
   <session_state>...</session_state>
-  <current_brief_json>...</current_brief_json>
-  <conversation>...</conversation>
+  <selected_brief_facts>...</selected_brief_facts>
+  <recent_conversation>...</recent_conversation>
 </session_context>
 ```
 

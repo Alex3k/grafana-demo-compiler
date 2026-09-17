@@ -56,10 +56,13 @@ outbound connectivity.
 
 - Application workloads run locally using Docker Compose.
 - A generated application contains at least three meaningful Go application
-  services, MySQL, and Grafana Alloy.
+  services and Grafana Alloy.
+- A database is optional. Include one only when the approved story requires
+  persistence or database investigation. When a database is included, it must
+  be MySQL.
 - A purpose-built simulator implemented in Go may count as one of the three
   application services when it performs a meaningful role in the requested
-  journey. MySQL, Alloy, and load-generation tooling do not count toward the
+  journey. A database, Alloy, and load-generation tooling do not count toward the
   three-service minimum.
 - Every demo session uses a dedicated Grafana Cloud demo stack created and
   managed through `gcx`.

@@ -228,6 +228,57 @@ func TestDockerCommandEnvIncludesCredentialHelperDirectory(t *testing.T) {
 	t.Fatal("Docker Desktop credential helper directory is missing from PATH")
 }
 
+func TestStopLocalRunsComposeDownInPrototypeRoot(t *testing.T) {
+	root := t.TempDir()
+	bin := t.TempDir()
+	argsPath := filepath.Join(t.TempDir(), "args")
+	dirPath := filepath.Join(t.TempDir(), "dir")
+	dockerPath := filepath.Join(bin, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$STOP_LOCAL_ARGS\"\nprintf '%s\\n' \"$PWD\" > \"$STOP_LOCAL_DIR\"\n"
+	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("STOP_LOCAL_ARGS", argsPath)
+	t.Setenv("STOP_LOCAL_DIR", dirPath)
+
+	var progress []string
+	if err := New().StopLocal(context.Background(), root, "ABC-123", func(message string) {
+		progress = append(progress, message)
+	}); err != nil {
+		t.Fatalf("StopLocal() error = %v", err)
+	}
+
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(args) != "compose\n--project-name\ndemocompilerabc123\ndown\n--remove-orphans\n" {
+		t.Fatalf("docker args = %q", args)
+	}
+	dir, err := os.ReadFile(dirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(dir)) != resolvedRoot {
+		t.Fatalf("docker directory = %q, want %q", strings.TrimSpace(string(dir)), root)
+	}
+	if len(progress) != 1 || progress[0] != "Stopping the previous local Docker Compose application" {
+		t.Fatalf("progress = %#v", progress)
+	}
+}
+
+func TestStopLocalRejectsNonAbsoluteRoot(t *testing.T) {
+	err := New().StopLocal(context.Background(), "prototype", "session", func(string) {})
+	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("StopLocal() error = %v", err)
+	}
+}
+
 func TestParseStackIncludesPrometheusConnection(t *testing.T) {
 	stack := parseStack([]byte(`{"url":"https://demostack.grafana.net","id":12345,"hmInstancePromUrl":"https://prometheus-prod-56-prod-us-east-2.grafana.net","hmInstancePromId":67890}`), "demostack")
 	if stack.PrometheusURL != "https://prometheus-prod-56-prod-us-east-2.grafana.net/api/prom/push" {

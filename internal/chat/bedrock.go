@@ -14,6 +14,7 @@ import (
 	"github.com/grafana/ai-sdk/provider"
 	"github.com/grafana/ai-sdk/providers/bedrock"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/contextengine"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 	"github.com/Alex3k/grafana-demo-compiler/internal/prototype"
@@ -63,6 +64,8 @@ type PrototypeResult struct {
 }
 
 type prototypeBuildPlan struct {
+	Title                string                   `json:"title"`
+	Contract             prototypeContract        `json:"demoContract"`
 	Summary              string                   `json:"summary"`
 	Decisions            []prototypeDecision      `json:"decisions"`
 	AlternativesRejected []prototypeAlternative   `json:"alternativesRejected"`
@@ -71,6 +74,21 @@ type prototypeBuildPlan struct {
 	Assumptions          []string                 `json:"assumptions"`
 	Risks                []string                 `json:"risks"`
 	Validation           []string                 `json:"validation"`
+}
+
+type prototypeContract struct {
+	Audience         domain.BriefItem       `json:"audience"`
+	Company          domain.BriefItem       `json:"company"`
+	Outcome          domain.BriefItem       `json:"outcome"`
+	Stakes           domain.BriefItem       `json:"stakes"`
+	Scenario         domain.BriefItem       `json:"scenario"`
+	Journey          domain.BriefItem       `json:"journey"`
+	ProofPoints      []domain.BriefItem     `json:"proofPoints"`
+	Scope            domain.BriefScope      `json:"scope"`
+	Services         []domain.BriefItem     `json:"services"`
+	Telemetry        []domain.BriefItem     `json:"telemetry"`
+	GrafanaResources []domain.BriefItem     `json:"grafanaResources"`
+	Narrative        []domain.NarrativeBeat `json:"narrative"`
 }
 
 type prototypeDecision struct {
@@ -186,32 +204,42 @@ func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
 			}
 			return o11y.Client
 		},
-		ContextProvider: func(ctx context.Context) agentobservability.ContextInfo {
-			name := observability.AgentName
-			if value, ok := agento11y.AgentNameFromContext(ctx); ok {
-				name = value
-			}
-			version := observability.AgentVersion
-			if value, ok := agento11y.AgentVersionFromContext(ctx); ok {
-				version = value
-			}
-			tags := agento11y.TagsFromContext(ctx)
-			if tags == nil {
-				tags = make(map[string]string)
-			}
-			tags["runtime"] = "local"
-			return agentobservability.ContextInfo{
-				AgentName:    name,
-				AgentVersion: version,
-				Tags:         tags,
-			}
-		},
+		ContextProvider: contextInfo,
 		Hooks: agentobservability.HooksOptions{
 			Enabled: func(context.Context) bool { return false },
 		},
 	})
 
 	return &Service{model: wrapped, modelID: modelID, region: region}, nil
+}
+
+func contextInfo(ctx context.Context) agentobservability.ContextInfo {
+	name := observability.AgentName
+	if value, ok := agento11y.AgentNameFromContext(ctx); ok {
+		name = value
+	}
+	version := observability.AgentVersion
+	if value, ok := agento11y.AgentVersionFromContext(ctx); ok {
+		version = value
+	}
+	tags := agento11y.TagsFromContext(ctx)
+	if tags == nil {
+		tags = make(map[string]string)
+	}
+	tags["runtime"] = "local"
+	metadata := map[string]any{}
+	if manifest, ok := observability.ContextManifestFromContext(ctx); ok {
+		metadata["context.schema_version"] = manifest.SchemaVersion
+		metadata["context.role"] = string(manifest.Role)
+		metadata["context.brief_version"] = manifest.BriefVersion
+		metadata["context.message_count"] = manifest.IncludedMessageCount
+		metadata["context.topic_keys"] = manifest.IncludedTopicKeys
+		metadata["context.includes_operational_state"] = manifest.IncludesOperationalState
+		metadata["context.approximate_characters"] = manifest.ApproximateCharacters
+	}
+	return agentobservability.ContextInfo{
+		AgentName: name, AgentVersion: version, Tags: tags, Metadata: metadata,
+	}
 }
 
 func (s *Service) Configured() bool {
@@ -238,11 +266,30 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 		return Result{}, ErrNotConfigured
 	}
 
-	ctx, generationID := roleContext(ctx, session, roleCollaborator)
+	compiler := contextengine.New(6)
+	var systemContext string
+	var selectedMessages []domain.Message
+	var manifest contextengine.Manifest
+	if focus == nil {
+		session.Messages = messages
+		packet := compiler.Collaborator(session)
+		manifest = packet.Manifest
+		selectedMessages = append(selectedMessages, packet.RecentMessages...)
+		if packet.CurrentUserMessage != nil {
+			selectedMessages = append(selectedMessages, *packet.CurrentUserMessage)
+		}
+		systemContext = collaboratorContext(packet)
+	} else {
+		packet := compiler.Focused(session, *focus, messages)
+		manifest = packet.Manifest
+		selectedMessages = packet.FocusedMessages
+		systemContext = focusedContext(packet)
+	}
+	ctx, generationID := roleContext(ctx, session, roleCollaborator, manifest)
 
 	stream := aisdk.StreamText(ctx, s.model,
-		aisdk.WithSystem(appPrompts.Collaborator()+briefContext(session)+focusContext(focus)),
-		aisdk.WithModelMessages(modelMessages(messages)...),
+		aisdk.WithSystem(appPrompts.Collaborator()+systemContext),
+		aisdk.WithModelMessages(modelMessages(selectedMessages)...),
 		aisdk.WithMaxOutputTokens(1200),
 		aisdk.WithMaxRetries(1),
 	)
@@ -269,15 +316,30 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 	return Result{Text: sanitizeAssistantText(text.String()), GenerationID: generationID}, nil
 }
 
-func focusContext(focus *domain.BriefFocus) string {
-	if focus == nil {
-		return ""
-	}
-	payload, err := json.Marshal(focus)
+func collaboratorContext(packet contextengine.CollaboratorContext) string {
+	payload, err := json.Marshal(struct {
+		ConfirmedFacts   []contextengine.Fact                     `json:"confirmedFacts,omitempty"`
+		ProposedFacts    []contextengine.Fact                     `json:"proposedFacts,omitempty"`
+		OpenQuestions    []string                                 `json:"openQuestions,omitempty"`
+		ReferenceState   contextengine.CollaboratorReferenceState `json:"referenceState,omitempty"`
+		OperationalState contextengine.OperationalState           `json:"operationalState"`
+	}{packet.ConfirmedFacts, packet.ProposedFacts, packet.OpenQuestions, packet.ReferenceState, packet.OperationalState})
 	if err != nil {
 		return ""
 	}
-	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThe human is iterating this topic in an isolated draft thread. Use the current living brief only as background, address the selected topic directly, and avoid broadening unless a dependency must be surfaced. Do not treat draft statements as confirmed, use the word confirmed for a draft change, claim that the living brief changed, or resume the main conversation. Describe the emerging result as a draft update and help the human converge on concise wording that they can explicitly confirm and apply later. End every response with a `### Proposed brief value` heading followed by one self-contained, concise paragraph containing exactly the value that should replace this topic if the human confirms it. This final section is required, must reflect the latest focused discussion, and must not contain questions.\n</focused_brief_topic>"
+	return "\n\n<collaborator_context>\n" + string(payload) + "\nConfirmed facts are authoritative and supersede contradictory conversation. The latest human message outranks current proposals. If it appears to change a confirmed fact, ask for confirmation before changing it. Operational state is authoritative evidence of recorded compiler operations, not a live health check.\n</collaborator_context>"
+}
+
+func focusedContext(packet contextengine.FocusedContext) string {
+	payload, err := json.Marshal(struct {
+		SelectedTopic     domain.BriefFocus    `json:"selectedTopic"`
+		GlobalConstraints []contextengine.Fact `json:"globalConstraints,omitempty"`
+		Dependencies      []contextengine.Fact `json:"dependencies,omitempty"`
+	}{packet.SelectedTopic, packet.GlobalConstraints, packet.Dependencies})
+	if err != nil {
+		return ""
+	}
+	return "\n\n<focused_brief_topic>\n" + string(payload) + "\nThis is the complete relevant brief context for this isolated draft thread. Address only the selected topic and surface a dependency only when it constrains that topic. Do not reopen unrelated sections, treat draft statements as confirmed, claim that the living brief changed, or resume the main conversation. End every response with a `### Proposed brief value` heading followed by one self-contained, concise paragraph containing exactly the value that should replace this topic if the human confirms it. This final section is required, must reflect the latest focused discussion, and must not contain questions.\n</focused_brief_topic>"
 }
 
 func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messages []domain.Message, parentGenerationIDs ...string) (BriefResult, error) {
@@ -285,10 +347,11 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, ErrNotConfigured
 	}
 
+	packet := contextengine.New(6).Curator(session, messages)
 	payload, err := json.Marshal(struct {
-		Current  *domain.LivingBrief `json:"currentBrief,omitempty"`
-		Messages []domain.Message    `json:"conversation"`
-	}{Current: session.Brief, Messages: conversationalMessages(messages)})
+		CurrentBrief  *domain.BriefContent `json:"currentBrief,omitempty"`
+		DeltaMessages []domain.Message     `json:"deltaMessages"`
+	}{packet.CurrentBrief, packet.DeltaMessages})
 	if err != nil {
 		return BriefResult{}, fmt.Errorf("encode living brief context: %w", err)
 	}
@@ -311,7 +374,7 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, fmt.Errorf("create living brief tool: %w", err)
 	}
 
-	ctx, generationID := roleContext(ctx, session, roleCurator, parentGenerationIDs...)
+	ctx, generationID := roleContext(ctx, session, roleCurator, packet.Manifest, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Curator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
@@ -339,15 +402,23 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 	if !s.Configured() {
 		return EvaluationResult{}, ErrNotConfigured
 	}
+	approved := domain.LivingBrief{Content: brief}
+	if session.Brief != nil {
+		approved.Version = session.Brief.Version
+		approved.SourceMessageID = session.Brief.SourceMessageID
+		approved.UpdatedAt = session.Brief.UpdatedAt
+	}
+	packet := contextengine.New(6).Evaluator(approved, acceptedAssistantPlan(messages))
 	payload, err := json.Marshal(struct {
-		Brief         domain.BriefContent `json:"brief"`
-		CandidatePlan string              `json:"candidatePlan"`
-	}{Brief: brief, CandidatePlan: acceptedAssistantPlan(messages)})
+		ApprovedBrief        domain.BriefContent  `json:"approvedBrief"`
+		ExplicitRequirements []contextengine.Fact `json:"explicitRequirements"`
+		CandidatePlan        string               `json:"candidatePlan"`
+	}{packet.ApprovedBrief, packet.ExplicitRequirements, packet.CandidatePlan})
 	if err != nil {
 		return EvaluationResult{}, fmt.Errorf("encode requirement evaluation context: %w", err)
 	}
 
-	ctx, generationID := roleContext(ctx, session, roleEvaluator, parentGenerationIDs...)
+	ctx, generationID := roleContext(ctx, session, roleEvaluator, packet.Manifest, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Evaluator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
@@ -427,15 +498,25 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		return PrototypeResult{}, fmt.Errorf("create prototype validation tool: %w", err)
 	}
 
+	planPayload, err := json.Marshal(plan)
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("encode prototype plan: %w", err)
+	}
+	packet := contextengine.New(6).Builder(planPayload, []string{
+		"All application services are written in Go.",
+		"A database is optional. If the approved plan needs one, use MySQL.",
+		"Use Alloy to send demo telemetry to Grafana Cloud.",
+		"Application deployment is local Docker Compose only.",
+		"Grafana Cloud resources are managed through gcx, not a local Grafana stack.",
+	})
 	payload, err := json.Marshal(struct {
-		Title string             `json:"title"`
-		Brief domain.LivingBrief `json:"livingBrief"`
-		Plan  prototypeBuildPlan `json:"implementationPlan"`
-	}{Title: session.Title, Brief: *session.Brief, Plan: plan})
+		ImplementationPlan json.RawMessage `json:"implementationPlan"`
+		Constraints        []string        `json:"constraints"`
+	}{packet.ImplementationPlan, packet.Constraints})
 	if err != nil {
 		return PrototypeResult{}, fmt.Errorf("encode prototype context: %w", err)
 	}
-	ctx, generationID := roleContext(ctx, session, roleBuilder, planGenerationID)
+	ctx, generationID := roleContext(ctx, session, roleBuilder, packet.Manifest, planGenerationID)
 	if onProgress != nil {
 		onProgress("Writing the planned application files")
 	}
@@ -467,10 +548,17 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 }
 
 func (s *Service) planPrototype(ctx context.Context, session domain.Session) (prototypeBuildPlan, string, error) {
+	var latest *domain.PrototypeIteration
+	if len(session.Prototypes) > 0 {
+		latest = &session.Prototypes[0]
+	}
+	packet := contextengine.New(6).Planner(*session.Brief, session.Brief.Content.Acceptance.Evaluation, latest)
 	payload, err := json.Marshal(struct {
-		Title string             `json:"title"`
-		Brief domain.LivingBrief `json:"livingBrief"`
-	}{Title: session.Title, Brief: *session.Brief})
+		Title           string                          `json:"title"`
+		ApprovedBrief   domain.BriefContent             `json:"approvedBrief"`
+		Evaluation      domain.AlignmentEvaluation      `json:"evaluation"`
+		LatestPrototype *contextengine.PrototypeSummary `json:"latestPrototype,omitempty"`
+	}{session.Title, packet.ApprovedBrief, packet.Evaluation, packet.LatestPrototype})
 	if err != nil {
 		return prototypeBuildPlan{}, "", fmt.Errorf("encode prototype planning context: %w", err)
 	}
@@ -487,7 +575,7 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 	if err != nil {
 		return prototypeBuildPlan{}, "", fmt.Errorf("create prototype planning tool: %w", err)
 	}
-	ctx, generationID := roleContext(ctx, session, rolePrototypePlanner)
+	ctx, generationID := roleContext(ctx, session, rolePrototypePlanner, packet.Manifest)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.PrototypePlanner()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
@@ -507,7 +595,19 @@ func (s *Service) planPrototype(ctx context.Context, session domain.Session) (pr
 	if strings.TrimSpace(plan.Summary) == "" || len(plan.Files) == 0 {
 		return prototypeBuildPlan{}, generationID, fmt.Errorf("prototype planner did not call %s with a complete plan", recordPrototypePlanTool)
 	}
+	plan.Title = session.Title
+	plan.Contract = prototypeContractFromBrief(session.Brief.Content)
 	return plan, generationID, nil
+}
+
+func prototypeContractFromBrief(content domain.BriefContent) prototypeContract {
+	return prototypeContract{
+		Audience: content.Audience, Company: content.Company, Outcome: content.Outcome,
+		Stakes: content.Stakes, Scenario: content.Scenario, Journey: content.Journey,
+		ProofPoints: content.ProofPoints, Scope: content.Scope, Services: content.Services,
+		Telemetry: content.Telemetry, GrafanaResources: content.GrafanaResources,
+		Narrative: content.Narrative,
+	}
 }
 
 func stripJSONFence(value string) string {
@@ -526,137 +626,7 @@ func sanitizeAssistantText(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func briefContext(session domain.Session) string {
-	payload, err := json.Marshal(struct {
-		State       string              `json:"sessionState"`
-		Brief       *domain.LivingBrief `json:"currentBrief,omitempty"`
-		Operational operationalState    `json:"operationalState"`
-	}{State: session.State, Brief: session.Brief, Operational: currentOperationalState(session)})
-	if err != nil {
-		return ""
-	}
-	context := "\n\n<session_context>\n" + string(payload) + "\nThe operational state above comes from the compiler's persisted build and deployment records and is authoritative evidence of recorded operations. Use it when answering what has been generated, provisioned, or started. A running deployment means Docker Compose started successfully at the recorded time; it is not a live health check. Only describe telemetry as verified when the deployment status is verified. Do not claim you lack visibility into these recorded operations.\n</session_context>"
-	if facts := confirmedBriefFacts(session.Brief); facts != "" {
-		context += "\n\n<confirmed_brief_facts>\nThese are the current locked facts. They supersede older conversation messages that proposed alternatives or called them unresolved. Use them as stated and do not reopen them.\n" + facts + "\n</confirmed_brief_facts>"
-	}
-	return context
-}
-
-type operationalState struct {
-	Prototype  *prototypeState  `json:"latestPrototype,omitempty"`
-	Deployment *deploymentState `json:"latestDeployment,omitempty"`
-}
-
-type prototypeState struct {
-	Iteration     int    `json:"iteration"`
-	BriefVersion  int    `json:"briefVersion"`
-	Status        string `json:"status"`
-	ArtifactCount int    `json:"artifactCount"`
-	ChecksPassed  int    `json:"checksPassed"`
-	ChecksTotal   int    `json:"checksTotal"`
-}
-
-type deploymentState struct {
-	PrototypeIteration int    `json:"prototypeIteration,omitempty"`
-	Target             string `json:"target"`
-	Region             string `json:"region"`
-	StackName          string `json:"stackName"`
-	StackSlug          string `json:"stackSlug"`
-	StackURL           string `json:"stackUrl,omitempty"`
-	Status             string `json:"status"`
-	LatestProgress     string `json:"latestProgress,omitempty"`
-}
-
-func currentOperationalState(session domain.Session) operationalState {
-	state := operationalState{}
-	if len(session.Prototypes) > 0 {
-		latest := session.Prototypes[0]
-		passed := 0
-		for _, check := range latest.Checks {
-			if check.Status == "passed" {
-				passed++
-			}
-		}
-		state.Prototype = &prototypeState{
-			Iteration: latest.Number, BriefVersion: latest.BriefVersion, Status: latest.Status,
-			ArtifactCount: len(latest.Artifacts), ChecksPassed: passed, ChecksTotal: len(latest.Checks),
-		}
-	}
-	if len(session.Deployments) > 0 {
-		latest := session.Deployments[0]
-		prototypeIteration := 0
-		for _, prototype := range session.Prototypes {
-			if prototype.ID == latest.PrototypeIterationID {
-				prototypeIteration = prototype.Number
-				break
-			}
-		}
-		progress := ""
-		if latest.Status != "failed" && latest.Status != "interrupted" && len(latest.Progress) > 0 {
-			progress = latest.Progress[len(latest.Progress)-1]
-			characters := []rune(progress)
-			if len(characters) > 240 {
-				progress = string(characters[:240])
-			}
-		}
-		state.Deployment = &deploymentState{
-			PrototypeIteration: prototypeIteration,
-			Target:             latest.Target, Region: latest.Region, StackName: latest.StackName,
-			StackSlug: latest.StackSlug, StackURL: latest.StackURL, Status: latest.Status,
-			LatestProgress: progress,
-		}
-	}
-	return state
-}
-
-func confirmedBriefFacts(brief *domain.LivingBrief) string {
-	if brief == nil {
-		return ""
-	}
-	type fact struct {
-		Section string `json:"section"`
-		Name    string `json:"name"`
-		Value   string `json:"value"`
-	}
-	facts := make([]fact, 0)
-	add := func(section string, item domain.BriefItem) {
-		if item.Status == "confirmed" {
-			facts = append(facts, fact{Section: section, Name: item.Name, Value: item.Value})
-		}
-	}
-	add("Audience", brief.Content.Audience)
-	add("Company", brief.Content.Company)
-	add("Outcome", brief.Content.Outcome)
-	add("Stakes", brief.Content.Stakes)
-	add("Scenario", brief.Content.Scenario)
-	add("Journey", brief.Content.Journey)
-	add("Simulation boundary", brief.Content.Scope.SimulationBoundary)
-	for _, group := range []struct {
-		section string
-		items   []domain.BriefItem
-	}{
-		{section: "Proof points", items: brief.Content.ProofPoints},
-		{section: "Included scope", items: brief.Content.Scope.Included},
-		{section: "Excluded scope", items: brief.Content.Scope.Excluded},
-		{section: "Services", items: brief.Content.Services},
-		{section: "Telemetry", items: brief.Content.Telemetry},
-		{section: "Grafana resources", items: brief.Content.GrafanaResources},
-	} {
-		for _, item := range group.items {
-			add(group.section, item)
-		}
-	}
-	if len(facts) == 0 {
-		return ""
-	}
-	payload, err := json.Marshal(facts)
-	if err != nil {
-		return ""
-	}
-	return string(payload)
-}
-
-func roleContext(ctx context.Context, session domain.Session, role string, parentGenerationIDs ...string) (context.Context, string) {
+func roleContext(ctx context.Context, session domain.Session, role string, manifest contextengine.Manifest, parentGenerationIDs ...string) (context.Context, string) {
 	generationID := agentobservability.NewGenerationID()
 	visibility := "internal"
 	ctx = agento11y.WithConversationID(ctx, session.ID)
@@ -666,7 +636,11 @@ func roleContext(ctx context.Context, session domain.Session, role string, paren
 	}
 	ctx = agento11y.WithAgentName(ctx, observability.AgentName+"/"+role)
 	ctx = agento11y.WithAgentVersion(ctx, observability.AgentVersion)
-	ctx = agento11y.WithTags(ctx, map[string]string{"agent.role": role, "generation.visibility": visibility, "prompt.version": appPrompts.Version})
+	ctx = agento11y.WithTags(ctx, map[string]string{
+		"agent.role": role, "generation.visibility": visibility, "prompt.version": appPrompts.Version,
+		"context.schema_version": manifest.SchemaVersion,
+	})
+	ctx = observability.WithContextManifest(ctx, manifest)
 	ctx = agentobservability.WithGenerationID(ctx, generationID)
 	ctx = agentobservability.WithParentGenerationIDs(ctx, parentGenerationIDs...)
 	return ctx, generationID

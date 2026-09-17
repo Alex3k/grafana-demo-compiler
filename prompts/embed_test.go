@@ -31,3 +31,19 @@ func TestCollaboratorTreatsCustomerProductionConstraintsAsContext(t *testing.T) 
 		}
 	}
 }
+
+func TestPromptsTreatDatabaseAsOptionalAndStandardizeOnMySQL(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"collaborator": Collaborator(),
+		"curator":      Curator(),
+		"builder":      Builder(),
+	} {
+		normalized := strings.Join(strings.Fields(prompt), " ")
+		if !strings.Contains(normalized, "A database is optional") {
+			t.Fatalf("%s prompt does not make the database optional", name)
+		}
+		if !strings.Contains(normalized, "use MySQL") && !strings.Contains(normalized, "must be MySQL") {
+			t.Fatalf("%s prompt does not standardize selected databases on MySQL", name)
+		}
+	}
+}

@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/application"
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
+	"github.com/Alex3k/grafana-demo-compiler/internal/deployment"
 	"github.com/Alex3k/grafana-demo-compiler/internal/httpapi"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
@@ -53,6 +55,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	prototypeRoot := filepath.Join(dataDir, "sessions")
+	briefService := application.NewBriefService(dataStore, chatService, logger)
+	chatWorkflow := application.NewChatService(dataStore, chatService, briefService, logger)
+	prototypeService := application.NewPrototypeService(dataStore, chatService, logger, prototypeRoot)
+	deploymentService := application.NewDeploymentService(dataStore, deployment.New(), logger, prototypeRoot)
 
 	var webFiles fs.FS
 	if _, err := os.Stat("web/dist/index.html"); err == nil {
@@ -60,7 +67,7 @@ func run(logger *slog.Logger) error {
 	}
 	server := &http.Server{
 		Addr:              envOrDefault("DEMO_COMPILER_ADDR", ":8080"),
-		Handler:           httpapi.New(dataStore, chatService, o11y, logger, filepath.Join(dataDir, "sessions"), webFiles),
+		Handler:           httpapi.New(dataStore, chatService, chatWorkflow, briefService, prototypeService, deploymentService, o11y, logger, webFiles),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

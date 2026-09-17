@@ -298,6 +298,23 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 	return nil
 }
 
+func (r *Runner) StopLocal(ctx context.Context, root, projectKey string, progress func(string)) error {
+	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) {
+		return errors.New("prototype output path must be absolute")
+	}
+
+	projectID := shortAlnum(projectKey, 10)
+	if projectID == "" {
+		return errors.New("local Docker Compose project key is invalid")
+	}
+	project := "democompiler" + projectID
+	progress("Stopping the previous local Docker Compose application")
+	if _, err := runIn(ctx, root, "docker", "compose", "--project-name", project, "down", "--remove-orphans"); err != nil {
+		return fmt.Errorf("stop local Docker Compose application: %w", err)
+	}
+	return nil
+}
+
 func loadEnvironmentDefaults(root string) map[string]string {
 	result := make(map[string]string)
 	content, err := os.ReadFile(filepath.Join(root, ".env.example"))

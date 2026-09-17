@@ -193,8 +193,14 @@ func composeContentCheck(root string) domain.PrototypeCheck {
 		return fail("Compose scope", "compose file is missing")
 	}
 	lower := strings.ToLower(string(content))
-	if !strings.Contains(lower, "mysql") {
-		return fail("Compose scope", "MySQL is not present")
+	for _, unsupported := range []string{
+		"postgres", "mariadb", "mongo", "redis", "sqlite", "cassandra",
+		"cockroachdb", "mssql", "sqlserver", "sql server", "oracle", "dynamodb",
+		"neo4j", "influxdb", "clickhouse",
+	} {
+		if strings.Contains(lower, unsupported) {
+			return fail("Compose scope", "unsupported database is present; use MySQL when a database is required: "+unsupported)
+		}
 	}
 	for _, image := range []string{"grafana/grafana", "grafana/loki", "grafana/tempo", "prom/prometheus"} {
 		if strings.Contains(lower, image) {
@@ -204,7 +210,10 @@ func composeContentCheck(root string) domain.PrototypeCheck {
 	if !strings.Contains(lower, "alloy") {
 		return fail("Compose scope", "Alloy is not present")
 	}
-	return pass("Compose scope", "contains MySQL and Alloy without local Grafana backends")
+	if strings.Contains(lower, "mysql") {
+		return pass("Compose scope", "contains optional MySQL and Alloy without local Grafana backends")
+	}
+	return pass("Compose scope", "contains Alloy without a database or local Grafana backends")
 }
 
 func commandCheck(ctx context.Context, root, name, command string, args ...string) domain.PrototypeCheck {

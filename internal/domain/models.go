@@ -173,7 +173,8 @@ type BriefContent struct {
 }
 
 type LivingBrief struct {
-	Version   int          `json:"version"`
-	UpdatedAt time.Time    `json:"updatedAt"`
-	Content   BriefContent `json:"content"`
+	Version         int          `json:"version"`
+	SourceMessageID string       `json:"sourceMessageId,omitempty"`
+	UpdatedAt       time.Time    `json:"updatedAt"`
+	Content         BriefContent `json:"content"`
 }

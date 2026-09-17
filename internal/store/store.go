@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS operations (
 CREATE TABLE IF NOT EXISTS living_briefs (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   version INTEGER NOT NULL,
+  source_message_id TEXT NOT NULL DEFAULT '',
   content TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (session_id, version)
@@ -202,6 +203,33 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES (7);
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)`); err != nil {
 		return fmt.Errorf("record deployment organization migration: %w", err)
+	}
+	var briefCursorColumnCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('living_briefs') WHERE name = 'source_message_id'`).Scan(&briefCursorColumnCount); err != nil {
+		return fmt.Errorf("inspect living brief cursor schema: %w", err)
+	}
+	if briefCursorColumnCount == 0 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE living_briefs ADD COLUMN source_message_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add living brief cursor: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `
+UPDATE living_briefs
+SET source_message_id = COALESCE((
+  SELECT messages.id
+  FROM messages
+  WHERE messages.session_id = living_briefs.session_id
+    AND messages.kind = 'message'
+    AND messages.status = 'complete'
+    AND messages.role IN ('user', 'assistant')
+    AND messages.created_at <= living_briefs.updated_at
+  ORDER BY messages.created_at DESC, messages.id DESC
+  LIMIT 1
+), '')`); err != nil {
+			return fmt.Errorf("backfill living brief cursor: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)`); err != nil {
+		return fmt.Errorf("record living brief cursor migration: %w", err)
 	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
@@ -366,6 +394,28 @@ SELECT id, session_id, prototype_iteration_id, target, region, stack_name, stack
 FROM deployments WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list deployments: %w", err)
+	}
+	defer rows.Close()
+	result := []domain.Deployment{}
+	for rows.Next() {
+		deployment, err := scanDeployment(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, deployment)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ListLocalCleanupCandidates(ctx context.Context) ([]domain.Deployment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
+FROM deployments
+WHERE target = 'local'
+  AND (status IN ('running', 'verifying', 'verified', 'failed') OR (status = 'interrupted' AND error <> ''))
+ORDER BY session_id, created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list active local deployments: %w", err)
 	}
 	defer rows.Close()
 	result := []domain.Deployment{}
@@ -563,6 +613,10 @@ func (s *Store) UpdateSessionState(ctx context.Context, id, state string) error 
 }
 
 func (s *Store) SaveBrief(ctx context.Context, sessionID string, content domain.BriefContent) (domain.LivingBrief, error) {
+	return s.SaveBriefWithCursor(ctx, sessionID, "", content)
+}
+
+func (s *Store) SaveBriefWithCursor(ctx context.Context, sessionID, sourceMessageID string, content domain.BriefContent) (domain.LivingBrief, error) {
 	payload, err := json.Marshal(content)
 	if err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("encode living brief: %w", err)
@@ -577,7 +631,7 @@ func (s *Store) SaveBrief(ctx context.Context, sessionID string, content domain.
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM living_briefs WHERE session_id = ?`, sessionID).Scan(&version); err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("find living brief version: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO living_briefs(session_id, version, content, updated_at) VALUES (?, ?, ?, ?)`, sessionID, version, string(payload), formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO living_briefs(session_id, version, source_message_id, content, updated_at) VALUES (?, ?, ?, ?, ?)`, sessionID, version, sourceMessageID, string(payload), formatTime(now)); err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("save living brief: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, formatTime(now), sessionID); err != nil {
@@ -586,13 +640,13 @@ func (s *Store) SaveBrief(ctx context.Context, sessionID string, content domain.
 	if err := tx.Commit(); err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("commit living brief: %w", err)
 	}
-	return domain.LivingBrief{Version: version, UpdatedAt: now, Content: content}, nil
+	return domain.LivingBrief{Version: version, SourceMessageID: sourceMessageID, UpdatedAt: now, Content: content}, nil
 }
 
 func (s *Store) GetBrief(ctx context.Context, sessionID string) (domain.LivingBrief, error) {
 	var brief domain.LivingBrief
 	var payload, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT version, content, updated_at FROM living_briefs WHERE session_id = ? ORDER BY version DESC LIMIT 1`, sessionID).Scan(&brief.Version, &payload, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT version, source_message_id, content, updated_at FROM living_briefs WHERE session_id = ? ORDER BY version DESC LIMIT 1`, sessionID).Scan(&brief.Version, &brief.SourceMessageID, &payload, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.LivingBrief{}, ErrNotFound
 	}
@@ -639,10 +693,22 @@ func (s *Store) UpdateMessage(ctx context.Context, id, content, status string) e
 }
 
 func (s *Store) ListMessages(ctx context.Context, sessionID string) ([]domain.Message, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return s.ListMessagesSince(ctx, sessionID, "")
+}
+
+func (s *Store) ListMessagesSince(ctx context.Context, sessionID, afterMessageID string) ([]domain.Message, error) {
+	query := `
 SELECT id, session_id, role, kind, content, status, created_at
-FROM messages WHERE session_id = ? ORDER BY created_at, id
-`, sessionID)
+FROM messages WHERE session_id = ?`
+	args := []any{sessionID}
+	if afterMessageID != "" {
+		query += ` AND (created_at, id) > (
+  SELECT created_at, id FROM messages WHERE session_id = ? AND id = ?
+)`
+		args = append(args, sessionID, afterMessageID)
+	}
+	query += ` ORDER BY created_at, id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
@@ -798,10 +864,15 @@ func (s *Store) ApplyBriefThread(ctx context.Context, sessionID, threadID string
 		return domain.LivingBrief{}, ErrNotFound
 	}
 	var version int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM living_briefs WHERE session_id = ?`, sessionID).Scan(&version); err != nil {
+	var sourceMessageID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(version), 0) + 1,
+       COALESCE((SELECT source_message_id FROM living_briefs WHERE session_id = ? ORDER BY version DESC LIMIT 1), '')
+FROM living_briefs WHERE session_id = ?
+`, sessionID, sessionID).Scan(&version, &sourceMessageID); err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("find confirmed brief version: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO living_briefs(session_id, version, content, updated_at) VALUES (?, ?, ?, ?)`, sessionID, version, string(payload), formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO living_briefs(session_id, version, source_message_id, content, updated_at) VALUES (?, ?, ?, ?, ?)`, sessionID, version, sourceMessageID, string(payload), formatTime(now)); err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("save confirmed brief: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, formatTime(now), sessionID); err != nil {
@@ -810,7 +881,7 @@ func (s *Store) ApplyBriefThread(ctx context.Context, sessionID, threadID string
 	if err := tx.Commit(); err != nil {
 		return domain.LivingBrief{}, fmt.Errorf("commit confirmed brief: %w", err)
 	}
-	return domain.LivingBrief{Version: version, UpdatedAt: now, Content: content}, nil
+	return domain.LivingBrief{Version: version, SourceMessageID: sourceMessageID, UpdatedAt: now, Content: content}, nil
 }
 
 func (s *Store) CreateOperation(ctx context.Context, operation domain.Operation) (domain.Operation, error) {

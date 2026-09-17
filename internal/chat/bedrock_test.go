@@ -7,12 +7,15 @@ import (
 
 	"github.com/grafana/agento11y/go/agento11y"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/contextengine"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
+	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 )
 
 func TestRoleContextAssociatesInternalAgentsWithSessionConversation(t *testing.T) {
 	session := domain.Session{ID: "session-123", Title: "Camera fleet demo"}
-	ctx, _ := roleContext(context.Background(), session, roleBuilder)
+	manifest := contextengine.Manifest{SchemaVersion: contextengine.SchemaVersion, Role: contextengine.RoleBuilder, IncludedMessageCount: 2}
+	ctx, _ := roleContext(context.Background(), session, roleBuilder, manifest)
 
 	if got, ok := agento11y.ConversationIDFromContext(ctx); !ok || got != session.ID {
 		t.Fatalf("conversation ID = %q, %v; want %q, true", got, ok, session.ID)
@@ -22,6 +25,16 @@ func TestRoleContextAssociatesInternalAgentsWithSessionConversation(t *testing.T
 	}
 	if got := agento11y.TagsFromContext(ctx)["generation.visibility"]; got != "internal" {
 		t.Fatalf("generation visibility = %q, want internal", got)
+	}
+	info := contextInfo(ctx)
+	if got := info.Metadata["context.message_count"]; got != 2 {
+		t.Fatalf("context message count = %#v", got)
+	}
+	if _, found := info.Tags["context.message_count"]; found {
+		t.Fatal("dynamic context count must not be exported as a metric tag")
+	}
+	if got, ok := observability.ContextManifestFromContext(ctx); !ok || got.Role != contextengine.RoleBuilder {
+		t.Fatalf("context manifest = %#v, %t", got, ok)
 	}
 }
 
@@ -66,9 +79,13 @@ func TestSanitizeAssistantTextRemovesInternalCompletionMarker(t *testing.T) {
 	}
 }
 
-func TestFocusContextKeepsTopicInsideMainSession(t *testing.T) {
-	got := focusContext(&domain.BriefFocus{Label: "Scenario", Value: "A camera fleet loses connectivity", Status: "proposed"})
-	for _, expected := range []string{"<focused_brief_topic>", `"label":"Scenario"`, `"status":"proposed"`, "isolated draft thread", "explicitly confirm"} {
+func TestFocusedContextKeepsOnlyCompiledTopicContext(t *testing.T) {
+	packet := contextengine.FocusedContext{
+		SelectedTopic: domain.BriefFocus{Label: "Scenario", Value: "A camera fleet loses connectivity", Status: "proposed"},
+		Dependencies:  []contextengine.Fact{{Topic: "services", Name: "Ingest", Value: "Go service"}},
+	}
+	got := focusedContext(packet)
+	for _, expected := range []string{"<focused_brief_topic>", `"label":"Scenario"`, `"status":"proposed"`, "complete relevant brief context", "human confirms"} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("focus context missing %q: %s", expected, got)
 		}
@@ -100,26 +117,20 @@ func TestPreserveConfirmedBriefRestoresOmittedTopic(t *testing.T) {
 	}
 }
 
-func TestBriefContextHighlightsConfirmedFactsAfterFullBrief(t *testing.T) {
-	session := domain.Session{
-		State: "Draft",
-		Brief: &domain.LivingBrief{Content: domain.BriefContent{
-			Telemetry: []domain.BriefItem{{Name: "Logs", Value: "Structured JSON events", Status: "confirmed"}},
-		}},
+func TestCollaboratorContextMakesConfirmedFactsAuthoritative(t *testing.T) {
+	packet := contextengine.CollaboratorContext{
+		ConfirmedFacts:   []contextengine.Fact{{Topic: "telemetry", Name: "Logs", Value: "Structured JSON events"}},
+		OperationalState: contextengine.OperationalState{SessionState: "Draft"},
 	}
-
-	got := briefContext(session)
-	for _, expected := range []string{"<confirmed_brief_facts>", `"section":"Telemetry"`, `"name":"Logs"`, `"value":"Structured JSON events"`, "supersede older conversation messages"} {
+	got := collaboratorContext(packet)
+	for _, expected := range []string{"<collaborator_context>", `"topic":"telemetry"`, `"name":"Logs"`, `"value":"Structured JSON events"`, "supersede contradictory conversation"} {
 		if !strings.Contains(got, expected) {
-			t.Fatalf("brief context missing %q: %s", expected, got)
+			t.Fatalf("collaborator context missing %q: %s", expected, got)
 		}
-	}
-	if strings.LastIndex(got, "<confirmed_brief_facts>") < strings.LastIndex(got, "</session_context>") {
-		t.Fatal("confirmed facts must follow the full session context")
 	}
 }
 
-func TestBriefContextIncludesAuthoritativeOperationalState(t *testing.T) {
+func TestCompiledCollaboratorContextOmitsSensitiveOperationalDetails(t *testing.T) {
 	session := domain.Session{
 		State: "Running",
 		Prototypes: []domain.PrototypeIteration{{
@@ -140,20 +151,19 @@ func TestBriefContextIncludesAuthoritativeOperationalState(t *testing.T) {
 		}},
 	}
 
-	got := briefContext(session)
+	packet := contextengine.New(6).Collaborator(session)
+	got := collaboratorContext(packet)
 	for _, expected := range []string{
-		`"sessionState":"Running"`, `"iteration":8`, `"prototypeIteration":7`,
-		`"stackSlug":"camera-demo"`, `"status":"running"`, `"latestProgress":"Docker Compose is running"`,
-		"operational state above comes from the compiler's persisted build and deployment records and is authoritative",
-		"it is not a live health check", "Only describe telemetry as verified when the deployment status is verified",
+		`"sessionState":"Running"`, `"number":8`, `"stackSlug":"camera-demo"`,
+		`"status":"running"`, "authoritative evidence of recorded compiler operations", "not a live health check",
 	} {
 		if !strings.Contains(got, expected) {
-			t.Fatalf("brief context missing %q: %s", expected, got)
+			t.Fatalf("collaborator context missing %q: %s", expected, got)
 		}
 	}
 	for _, sensitive := range []string{"secret-endpoint.example", "12345", "/private/generated/demo", "secret diagnostic output", "New iteration not deployed"} {
 		if strings.Contains(got, sensitive) {
-			t.Fatalf("brief context exposed deployment credential metadata %q: %s", sensitive, got)
+			t.Fatalf("collaborator context exposed operational detail %q: %s", sensitive, got)
 		}
 	}
 }

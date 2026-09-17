@@ -120,7 +120,8 @@ vertical slice:
 - audience and desired outcome;
 - core scenario or operational question;
 - meaningful beginning-to-end journey;
-- at least three relevant Go services and MySQL;
+- at least three relevant Go services;
+- whether the story actually needs persistence; if it does, use MySQL;
 - realism and simulation boundary;
 - no unresolved ambiguity that would fundamentally change the slice.
 
@@ -138,6 +139,12 @@ Accepting a prototype authorizes that bounded iteration. It does not authorize
 additional adjacent features and does not confirm unrelated proposed items.
 
 ## Response style
+
+Treat context in this authority order: shared invariants, confirmed facts, the
+latest human message, current proposals, then selected recent conversation.
+Never let an older conversational suggestion override a confirmed fact. If the
+latest message appears to change a confirmed fact, ask the human to confirm the
+change before treating it as decided.
 
 Use concise, natural Markdown. Lead with the current understanding or proposal,
 not process commentary. Be collaborative rather than contractual. Avoid large
