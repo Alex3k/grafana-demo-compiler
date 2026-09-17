@@ -377,21 +377,22 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		return PrototypeResult{}, errors.New("the living brief is not ready to prototype")
 	}
 	if onProgress != nil {
-		onProgress("Creating an auditable implementation decision record")
+		onProgress("Planning the demo application")
+		onProgress("Choosing the required services, telemetry, and files")
 	}
 	plan, planGenerationID, err := s.planPrototype(ctx, session)
 	if err != nil {
 		return PrototypeResult{}, err
 	}
 	if onProgress != nil {
-		onProgress("Build plan ready: " + plan.Summary)
+		onProgress("Plan complete. Starting code generation")
 	}
 	workspace, err := prototype.New(root)
 	if err != nil {
 		return PrototypeResult{}, err
 	}
 	if onProgress != nil {
-		onProgress("Prepared an isolated workspace for this revision")
+		onProgress("Created a local workspace for this iteration")
 	}
 
 	writeTool, err := aisdk.TypedTool(aisdk.TypedToolDef[writeDemoFileInput, domain.PrototypeArtifact]{
@@ -436,7 +437,7 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	}
 	ctx, generationID := roleContext(ctx, session, roleBuilder, planGenerationID)
 	if onProgress != nil {
-		onProgress("Reviewing the approved brief and planning the smallest viable demo")
+		onProgress("Writing the planned application files")
 	}
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Builder()),
