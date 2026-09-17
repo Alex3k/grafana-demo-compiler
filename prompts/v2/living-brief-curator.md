@@ -106,7 +106,14 @@ adjacent domain capabilities in `excluded`, not as speculative future services.
 
 `acceptance.accepted` is true only when the human explicitly accepts the current
 plan. If a material requirement changes after acceptance, set it to false until
-the revised direction is explicitly accepted. Do not evaluate the accepted
+the revised direction is explicitly accepted. When accepting, set `proposalMessageId` to the exact completed assistant
+message containing the accepted proposal and `acceptingMessageId` to the user
+message explicitly accepting it. Copy IDs from the input; never invent them.
+The first supplied message may be the previous proposal repeated for reference.
+When not accepting, use empty strings for both IDs. Preserve existing acceptance
+on unchanged briefs. A changed brief requires acceptance in a subsequent turn;
+do not carry approval forward. The backend owns the approval's brief hash.
+Do not evaluate the accepted
 plan; that belongs to the independent Requirement Evaluator.
 
 ## Status values
@@ -164,6 +171,6 @@ keep the complete tool input below 4,000 tokens.
     "grafanaResources": ["string"],
     "assumptions": ["string"]
   },
-  "acceptance": {"accepted":false,"evidence":"string"}
+  "acceptance": {"accepted":false,"evidence":"string","proposalMessageId":"","acceptingMessageId":""}
 }
 ```

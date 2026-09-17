@@ -167,9 +167,12 @@ type AlignmentEvaluation struct {
 }
 
 type PlanAcceptance struct {
-	Accepted   bool                `json:"accepted"`
-	Evidence   string              `json:"evidence"`
-	Evaluation AlignmentEvaluation `json:"evaluation"`
+	ProposalMessageID  string              `json:"proposalMessageId,omitempty"`
+	AcceptingMessageID string              `json:"acceptingMessageId,omitempty"`
+	BriefHash          string              `json:"briefHash,omitempty"`
+	Accepted           bool                `json:"accepted"`
+	Evidence           string              `json:"evidence"`
+	Evaluation         AlignmentEvaluation `json:"evaluation"`
 }
 
 type BriefContent struct {

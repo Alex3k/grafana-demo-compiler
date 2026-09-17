@@ -42,6 +42,7 @@ const (
 // Manifest describes what was selected without exposing prompt contents.
 // It is suitable for attaching to Agent Observability generations.
 type Manifest struct {
+	BriefHash                string            `json:"briefHash,omitempty"`
 	SchemaVersion            string            `json:"schemaVersion"`
 	Role                     Role              `json:"role"`
 	BriefVersion             int               `json:"briefVersion,omitempty"`
@@ -398,6 +399,7 @@ func (c Compiler) Evaluator(approved domain.LivingBrief, candidatePlan string) (
 	if err != nil {
 		return EvaluatorContext{}, err
 	}
+	manifest.BriefHash = approved.Content.AcceptanceHash()
 	result.Manifest = manifest
 	return result, nil
 }
