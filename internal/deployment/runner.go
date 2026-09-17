@@ -11,15 +11,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type Stack struct {
-	URL          string
-	OTLPEndpoint string
-	InstanceID   string
+	URL                string
+	OTLPEndpoint       string
+	InstanceID         string
+	PrometheusURL      string
+	PrometheusUsername string
 }
 
 type Runner struct {
@@ -203,7 +206,7 @@ func isNotFound(err error) bool {
 	return strings.Contains(message, "not found") || strings.Contains(message, "404")
 }
 
-func (r *Runner) StartLocal(ctx context.Context, root, endpoint, instanceID, token, projectKey string, progress func(string)) error {
+func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, instanceID, token, projectKey string, progress func(string)) error {
 	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) {
 		return errors.New("prototype output path must be absolute")
 	}
@@ -220,16 +223,39 @@ func (r *Runner) StartLocal(ctx context.Context, root, endpoint, instanceID, tok
 	if err := ensureDockerignore(root); err != nil {
 		return err
 	}
+	stackPayload, err := run(ctx, "gcx", "cloud", "stacks", "get", stackSlug, "-o", "json")
+	if err != nil {
+		return fmt.Errorf("read Grafana Cloud metrics connection details: %w", err)
+	}
+	stack := parseStack(stackPayload, stackSlug)
+	if stack.PrometheusURL == "" || stack.PrometheusUsername == "" {
+		return errors.New("Grafana Cloud metrics connection details are incomplete")
+	}
 
 	progress("Writing protected local telemetry configuration")
 	project := "democompiler" + shortAlnum(projectKey, 10)
-	content := strings.Join([]string{
-		"GRAFANA_CLOUD_OTLP_ENDPOINT=" + endpoint,
-		"GRAFANA_CLOUD_INSTANCE_ID=" + instanceID,
-		"GRAFANA_CLOUD_API_KEY=" + token,
-		"COMPOSE_PROJECT_NAME=" + project,
-		"",
-	}, "\n")
+	environment := loadEnvironmentDefaults(root)
+	environment["GRAFANA_CLOUD_OTLP_ENDPOINT"] = endpoint
+	environment["GRAFANA_CLOUD_INSTANCE_ID"] = instanceID
+	environment["GRAFANA_CLOUD_API_KEY"] = token
+	environment["GRAFANA_CLOUD_OTLP_USERNAME"] = instanceID
+	environment["GRAFANA_CLOUD_OTLP_PASSWORD"] = token
+	environment["GRAFANA_OTLP_ENDPOINT"] = endpoint
+	environment["GRAFANA_OTLP_USER"] = instanceID
+	environment["GRAFANA_API_KEY"] = token
+	environment["GRAFANA_PROM_URL"] = stack.PrometheusURL
+	environment["GRAFANA_PROM_USER"] = stack.PrometheusUsername
+	environment["COMPOSE_PROJECT_NAME"] = project
+	keys := make([]string, 0, len(environment))
+	for key := range environment {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys))
+	for _, key := range keys {
+		lines = append(lines, key+"="+environment[key])
+	}
+	content := strings.Join(lines, "\n") + "\n"
 	envPath := filepath.Join(root, ".env")
 	temporary, err := os.CreateTemp(root, ".env.tmp-")
 	if err != nil {
@@ -270,6 +296,38 @@ func (r *Runner) StartLocal(ctx context.Context, root, endpoint, instanceID, tok
 		return errors.New("Docker Compose started no services")
 	}
 	return nil
+}
+
+func loadEnvironmentDefaults(root string) map[string]string {
+	result := make(map[string]string)
+	content, err := os.ReadFile(filepath.Join(root, ".env.example"))
+	if err != nil {
+		return result
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		key = strings.TrimSpace(key)
+		if !found || strings.HasPrefix(key, "GRAFANA_") || !validEnvKey(key) || strings.Contains(value, "<") {
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func validEnvKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, character := range value {
+		if index == 0 && character >= '0' && character <= '9' {
+			return false
+		}
+		if (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func ensureDockerignore(root string) error {
@@ -362,11 +420,43 @@ func runIn(ctx context.Context, root, command string, args ...string) ([]byte, e
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = root
-	output, err := cmd.CombinedOutput()
+	if command == "docker" {
+		cmd.Env = dockerCommandEnv()
+	}
+	output, err := cmd.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			if len(output) > 0 {
+				output = append(output, '\n')
+			}
+			output = append(output, exitErr.Stderr...)
+		}
 		return nil, commandError(err, output)
 	}
 	return output, nil
+}
+
+func dockerCommandEnv() []string {
+	environment := os.Environ()
+	path := os.Getenv("PATH")
+	prefix := strings.Join([]string{
+		"/usr/local/bin",
+		"/opt/homebrew/bin",
+		"/Applications/Docker.app/Contents/Resources/bin",
+	}, string(os.PathListSeparator))
+	if path != "" {
+		path = prefix + string(os.PathListSeparator) + path
+	} else {
+		path = prefix
+	}
+	for index, item := range environment {
+		if strings.HasPrefix(item, "PATH=") {
+			environment[index] = "PATH=" + path
+			return environment
+		}
+	}
+	return append(environment, "PATH="+path)
 }
 
 func executable(command string) (string, error) {
@@ -429,15 +519,32 @@ func parseStack(payload []byte, slug string) Stack {
 		return Stack{}
 	}
 	stack := Stack{
-		URL:          firstString(value, "url", "stack_url", "stackUrl"),
-		OTLPEndpoint: firstString(value, "otlp_url", "otlpUrl", "otlpHttpUrl", "otlp_endpoint", "otlpEndpoint"),
-		InstanceID:   firstScalar(value, "id", "instance_id", "instanceId"),
+		URL:                firstString(value, "url", "stack_url", "stackUrl"),
+		OTLPEndpoint:       firstString(value, "otlp_url", "otlpUrl", "otlpHttpUrl", "otlp_endpoint", "otlpEndpoint"),
+		InstanceID:         firstScalar(value, "id", "instance_id", "instanceId"),
+		PrometheusURL:      firstString(value, "hmInstancePromUrl"),
+		PrometheusUsername: firstScalar(value, "hmInstancePromId"),
 	}
 	if stack.OTLPEndpoint != "" {
 		stack.OTLPEndpoint, _ = validateOTLPEndpoint(stack.OTLPEndpoint)
 	}
 	if stack.URL == "" && slug != "" {
 		stack.URL = "https://" + slug + ".grafana.net"
+	}
+	if stack.PrometheusURL != "" {
+		parsed, err := url.Parse(strings.TrimRight(stack.PrometheusURL, "/"))
+		if err != nil {
+			stack.PrometheusURL = ""
+			return stack
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+			!strings.HasPrefix(host, "prometheus-") || !strings.HasSuffix(host, ".grafana.net") {
+			stack.PrometheusURL = ""
+		} else {
+			parsed.Path = strings.TrimRight(parsed.Path, "/") + "/api/prom/push"
+			stack.PrometheusURL = parsed.String()
+		}
 	}
 	return stack
 }

@@ -265,7 +265,7 @@ func (s *Server) runLocalDeployment(item domain.Deployment, root, token string) 
 		defer cancelPersist()
 		_ = s.store.UpdateDeployment(persistCtx, item)
 	}
-	err := s.deployment.StartLocal(ctx, root, item.OTLPEndpoint, item.InstanceID, token, item.SessionID, appendProgress)
+	err := s.deployment.StartLocal(ctx, root, item.StackSlug, item.OTLPEndpoint, item.InstanceID, token, item.SessionID, appendProgress)
 	token = ""
 	if err != nil {
 		item.Status = "failed"

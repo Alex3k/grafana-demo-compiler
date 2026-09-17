@@ -209,6 +209,47 @@ func TestRedactError(t *testing.T) {
 	}
 }
 
+func TestRunInKeepsSuccessfulStderrOutOfStructuredOutput(t *testing.T) {
+	output, err := runIn(context.Background(), t.TempDir(), "sh", "-c", `printf '{"services":{}}'; printf 'warning' >&2`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != `{"services":{}}` {
+		t.Fatalf("runIn() = %q", output)
+	}
+}
+
+func TestDockerCommandEnvIncludesCredentialHelperDirectory(t *testing.T) {
+	for _, item := range dockerCommandEnv() {
+		if strings.HasPrefix(item, "PATH=") && strings.Contains(item, "/Applications/Docker.app/Contents/Resources/bin") {
+			return
+		}
+	}
+	t.Fatal("Docker Desktop credential helper directory is missing from PATH")
+}
+
+func TestParseStackIncludesPrometheusConnection(t *testing.T) {
+	stack := parseStack([]byte(`{"url":"https://demostack.grafana.net","id":12345,"hmInstancePromUrl":"https://prometheus-prod-56-prod-us-east-2.grafana.net","hmInstancePromId":67890}`), "demostack")
+	if stack.PrometheusURL != "https://prometheus-prod-56-prod-us-east-2.grafana.net/api/prom/push" {
+		t.Fatalf("PrometheusURL = %q", stack.PrometheusURL)
+	}
+	if stack.PrometheusUsername != "67890" {
+		t.Fatalf("PrometheusUsername = %q", stack.PrometheusUsername)
+	}
+}
+
+func TestLoadEnvironmentDefaultsSkipsGrafanaAndPlaceholders(t *testing.T) {
+	root := t.TempDir()
+	content := "MYSQL_PASSWORD=demo\nGRAFANA_API_KEY=<token>\nINVALID-KEY=value\n"
+	if err := os.WriteFile(filepath.Join(root, ".env.example"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defaults := loadEnvironmentDefaults(root)
+	if defaults["MYSQL_PASSWORD"] != "demo" || len(defaults) != 1 {
+		t.Fatalf("loadEnvironmentDefaults() = %#v", defaults)
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
