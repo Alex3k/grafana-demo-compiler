@@ -117,9 +117,30 @@ CREATE TABLE IF NOT EXISTS brief_thread_messages (
 CREATE INDEX IF NOT EXISTS brief_thread_messages_thread_created_idx
   ON brief_thread_messages(thread_id, created_at, id);
 
+CREATE TABLE IF NOT EXISTS prototype_iterations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  iteration_number INTEGER NOT NULL,
+  brief_version INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('generating', 'complete', 'failed')),
+  root_path TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  artifacts TEXT NOT NULL DEFAULT '[]',
+  checks TEXT NOT NULL DEFAULT '[]',
+  progress TEXT NOT NULL DEFAULT '[]',
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(session_id, iteration_number)
+);
+
+CREATE INDEX IF NOT EXISTS prototype_iterations_session_number_idx
+  ON prototype_iterations(session_id, iteration_number DESC);
+
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
@@ -136,11 +157,24 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)`); err != nil {
 		return fmt.Errorf("record brief thread candidate migration: %w", err)
 	}
+	var progressColumnCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('prototype_iterations') WHERE name = 'progress'`).Scan(&progressColumnCount); err != nil {
+		return fmt.Errorf("inspect prototype progress schema: %w", err)
+	}
+	if progressColumnCount == 0 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE prototype_iterations ADD COLUMN progress TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return fmt.Errorf("add prototype progress: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)`); err != nil {
+		return fmt.Errorf("record prototype progress migration: %w", err)
+	}
 	_, err := s.db.ExecContext(ctx, `
 UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE brief_thread_messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE operations SET status = 'interrupted', ended_at = ? WHERE status = 'running';
-`, formatTime(time.Now().UTC()))
+UPDATE prototype_iterations SET status = 'failed', error = 'Prototype generation was interrupted', updated_at = ? WHERE status = 'generating';
+`, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("recover interrupted work: %w", err)
 	}
@@ -202,7 +236,159 @@ func (s *Store) GetSession(ctx context.Context, id string) (domain.Session, erro
 	if err == nil {
 		session.Brief = &brief
 	}
+	prototypes, err := s.ListPrototypeIterations(ctx, id)
+	if err != nil {
+		return domain.Session{}, err
+	}
+	session.Prototypes = prototypes
 	return session, nil
+}
+
+func (s *Store) CreatePrototypeIteration(ctx context.Context, sessionID string, briefVersion int) (domain.PrototypeIteration, error) {
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.PrototypeIteration{}, fmt.Errorf("begin prototype iteration: %w", err)
+	}
+	defer tx.Rollback()
+	var number int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(iteration_number), 0) + 1 FROM prototype_iterations WHERE session_id = ?`, sessionID).Scan(&number); err != nil {
+		return domain.PrototypeIteration{}, fmt.Errorf("find prototype iteration number: %w", err)
+	}
+	iteration := domain.PrototypeIteration{
+		ID: newID(), SessionID: sessionID, Number: number, BriefVersion: briefVersion,
+		Status: "generating", Artifacts: []domain.PrototypeArtifact{}, Checks: []domain.PrototypeCheck{}, Progress: []string{"Starting a new local prototype iteration"},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO prototype_iterations(id, session_id, iteration_number, brief_version, status, progress, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, iteration.ID, sessionID, number, briefVersion, iteration.Status, `["Starting a new local prototype iteration"]`, formatTime(now), formatTime(now))
+	if err != nil {
+		return domain.PrototypeIteration{}, fmt.Errorf("create prototype iteration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, formatTime(now), sessionID); err != nil {
+		return domain.PrototypeIteration{}, fmt.Errorf("touch session for prototype: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.PrototypeIteration{}, fmt.Errorf("commit prototype iteration: %w", err)
+	}
+	return iteration, nil
+}
+
+func (s *Store) UpdatePrototypeProgress(ctx context.Context, iteration domain.PrototypeIteration) error {
+	if iteration.Progress == nil {
+		iteration.Progress = []string{}
+	}
+	progress, err := json.Marshal(iteration.Progress)
+	if err != nil {
+		return fmt.Errorf("encode prototype progress: %w", err)
+	}
+	iteration.UpdatedAt = time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE prototype_iterations SET root_path = ?, progress = ?, updated_at = ? WHERE id = ? AND session_id = ?`,
+		iteration.RootPath, string(progress), formatTime(iteration.UpdatedAt), iteration.ID, iteration.SessionID)
+	if err != nil {
+		return fmt.Errorf("update prototype progress: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) FinishPrototypeIteration(ctx context.Context, iteration domain.PrototypeIteration) error {
+	if iteration.Artifacts == nil {
+		iteration.Artifacts = []domain.PrototypeArtifact{}
+	}
+	if iteration.Checks == nil {
+		iteration.Checks = []domain.PrototypeCheck{}
+	}
+	if iteration.Progress == nil {
+		iteration.Progress = []string{}
+	}
+	artifacts, err := json.Marshal(iteration.Artifacts)
+	if err != nil {
+		return fmt.Errorf("encode prototype artifacts: %w", err)
+	}
+	checks, err := json.Marshal(iteration.Checks)
+	if err != nil {
+		return fmt.Errorf("encode prototype checks: %w", err)
+	}
+	progress, err := json.Marshal(iteration.Progress)
+	if err != nil {
+		return fmt.Errorf("encode prototype progress: %w", err)
+	}
+	iteration.UpdatedAt = time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin prototype completion: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE prototype_iterations
+SET status = ?, root_path = ?, summary = ?, artifacts = ?, checks = ?, progress = ?, error = ?, updated_at = ?
+WHERE id = ? AND session_id = ?`, iteration.Status, iteration.RootPath, iteration.Summary, string(artifacts), string(checks), string(progress), iteration.Error, formatTime(iteration.UpdatedAt), iteration.ID, iteration.SessionID)
+	if err != nil {
+		return fmt.Errorf("finish prototype iteration: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, formatTime(iteration.UpdatedAt), iteration.SessionID); err != nil {
+		return fmt.Errorf("touch session after prototype: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit prototype completion: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListPrototypeIterations(ctx context.Context, sessionID string) ([]domain.PrototypeIteration, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, session_id, iteration_number, brief_version, status, root_path, summary, artifacts, checks, progress, error, created_at, updated_at
+FROM prototype_iterations WHERE session_id = ? ORDER BY iteration_number DESC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list prototype iterations: %w", err)
+	}
+	defer rows.Close()
+	iterations := make([]domain.PrototypeIteration, 0)
+	for rows.Next() {
+		var iteration domain.PrototypeIteration
+		var artifacts, checks, progress, created, updated string
+		if err := rows.Scan(&iteration.ID, &iteration.SessionID, &iteration.Number, &iteration.BriefVersion, &iteration.Status, &iteration.RootPath, &iteration.Summary, &artifacts, &checks, &progress, &iteration.Error, &created, &updated); err != nil {
+			return nil, fmt.Errorf("scan prototype iteration: %w", err)
+		}
+		if err := json.Unmarshal([]byte(artifacts), &iteration.Artifacts); err != nil {
+			return nil, fmt.Errorf("decode prototype artifacts: %w", err)
+		}
+		if err := json.Unmarshal([]byte(checks), &iteration.Checks); err != nil {
+			return nil, fmt.Errorf("decode prototype checks: %w", err)
+		}
+		if err := json.Unmarshal([]byte(progress), &iteration.Progress); err != nil {
+			return nil, fmt.Errorf("decode prototype progress: %w", err)
+		}
+		if iteration.Artifacts == nil {
+			iteration.Artifacts = []domain.PrototypeArtifact{}
+		}
+		if iteration.Checks == nil {
+			iteration.Checks = []domain.PrototypeCheck{}
+		}
+		if iteration.Progress == nil {
+			iteration.Progress = []string{}
+		}
+		iteration.CreatedAt, err = parseTime(created)
+		if err != nil {
+			return nil, err
+		}
+		iteration.UpdatedAt, err = parseTime(updated)
+		if err != nil {
+			return nil, err
+		}
+		iterations = append(iterations, iteration)
+	}
+	return iterations, rows.Err()
 }
 
 func (s *Store) RenameSession(ctx context.Context, id, title string) error {

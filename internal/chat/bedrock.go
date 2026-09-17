@@ -16,13 +16,20 @@ import (
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
+	"github.com/Alex3k/grafana-demo-compiler/internal/prototype"
 	appPrompts "github.com/Alex3k/grafana-demo-compiler/prompts"
 )
 
 const (
-	roleCollaborator = "demo-collaborator"
-	roleCurator      = "living-brief-curator"
-	roleEvaluator    = "requirement-evaluator"
+	roleCollaborator        = "demo-collaborator"
+	roleCurator             = "living-brief-curator"
+	roleEvaluator           = "requirement-evaluator"
+	rolePrototypePlanner    = "prototype-planner"
+	roleBuilder             = "prototype-builder"
+	briefUpdateTool         = "propose_brief_update"
+	recordPrototypePlanTool = "record_prototype_plan"
+	writeDemoFileTool       = "write_demo_file"
+	validatePrototypeTool   = "validate_prototype"
 )
 
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
@@ -46,6 +53,122 @@ type BriefResult struct {
 type EvaluationResult struct {
 	Evaluation   domain.AlignmentEvaluation
 	GenerationID string
+}
+
+type PrototypeResult struct {
+	Summary      string
+	Artifacts    []domain.PrototypeArtifact
+	Checks       []domain.PrototypeCheck
+	GenerationID string
+}
+
+type prototypeBuildPlan struct {
+	Summary              string                   `json:"summary"`
+	Decisions            []prototypeDecision      `json:"decisions"`
+	AlternativesRejected []prototypeAlternative   `json:"alternativesRejected"`
+	Files                []prototypeFilePlan      `json:"files"`
+	TelemetryMapping     []prototypeTelemetryPlan `json:"telemetryMapping"`
+	Assumptions          []string                 `json:"assumptions"`
+	Risks                []string                 `json:"risks"`
+	Validation           []string                 `json:"validation"`
+}
+
+type prototypeDecision struct {
+	Decision  string `json:"decision"`
+	Rationale string `json:"rationale"`
+	Evidence  string `json:"evidence"`
+}
+
+type prototypeAlternative struct {
+	Alternative string `json:"alternative"`
+	Reason      string `json:"reason"`
+}
+
+type prototypeFilePlan struct {
+	Path    string `json:"path"`
+	Purpose string `json:"purpose"`
+}
+
+type prototypeTelemetryPlan struct {
+	Signal    string `json:"signal"`
+	Source    string `json:"source"`
+	StoryBeat string `json:"storyBeat"`
+}
+
+type prototypePlanReceipt struct {
+	Status    string `json:"status"`
+	FileCount int    `json:"fileCount"`
+}
+
+type writeDemoFileInput struct {
+	Path    string `json:"path" jsonschema:"description=Relative path for the prototype file"`
+	Content string `json:"content" jsonschema:"description=Complete file content"`
+}
+
+type prototypeValidationInput struct{}
+
+type prototypeValidationOutput struct {
+	Checks []domain.PrototypeCheck `json:"checks"`
+}
+
+type briefUpdateReceipt struct {
+	Status      string `json:"status"`
+	ChangeCount int    `json:"changeCount"`
+}
+
+// briefUpdateProposal mirrors the curator-owned brief contract. The persisted
+// PlanAcceptance also contains an evaluator result, but the curator must not
+// produce that field.
+type briefUpdateProposal struct {
+	Changes          []string               `json:"changes"`
+	Audience         domain.BriefItem       `json:"audience"`
+	Company          domain.BriefItem       `json:"company"`
+	Outcome          domain.BriefItem       `json:"outcome"`
+	Stakes           domain.BriefItem       `json:"stakes"`
+	Scenario         domain.BriefItem       `json:"scenario"`
+	Journey          domain.BriefItem       `json:"journey"`
+	ProofPoints      []domain.BriefItem     `json:"proofPoints"`
+	Scope            domain.BriefScope      `json:"scope"`
+	Services         []domain.BriefItem     `json:"services"`
+	Telemetry        []domain.BriefItem     `json:"telemetry"`
+	GrafanaResources []domain.BriefItem     `json:"grafanaResources"`
+	Narrative        []domain.NarrativeBeat `json:"narrative"`
+	Mermaid          string                 `json:"mermaid"`
+	OpenQuestions    []string               `json:"openQuestions"`
+	Decisions        []domain.BriefDecision `json:"decisions"`
+	PrototypeOffer   domain.PrototypeOffer  `json:"prototypeOffer"`
+	Acceptance       briefAcceptance        `json:"acceptance"`
+}
+
+type briefAcceptance struct {
+	Accepted bool   `json:"accepted"`
+	Evidence string `json:"evidence"`
+}
+
+func (proposal briefUpdateProposal) content() domain.BriefContent {
+	return domain.BriefContent{
+		Changes:          proposal.Changes,
+		Audience:         proposal.Audience,
+		Company:          proposal.Company,
+		Outcome:          proposal.Outcome,
+		Stakes:           proposal.Stakes,
+		Scenario:         proposal.Scenario,
+		Journey:          proposal.Journey,
+		ProofPoints:      proposal.ProofPoints,
+		Scope:            proposal.Scope,
+		Services:         proposal.Services,
+		Telemetry:        proposal.Telemetry,
+		GrafanaResources: proposal.GrafanaResources,
+		Narrative:        proposal.Narrative,
+		Mermaid:          proposal.Mermaid,
+		OpenQuestions:    proposal.OpenQuestions,
+		Decisions:        proposal.Decisions,
+		PrototypeOffer:   proposal.PrototypeOffer,
+		Acceptance: domain.PlanAcceptance{
+			Accepted: proposal.Acceptance.Accepted,
+			Evidence: proposal.Acceptance.Evidence,
+		},
+	}
 }
 
 func New(_ context.Context, o11y *observability.Runtime) (*Service, error) {
@@ -170,10 +293,31 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 		return BriefResult{}, fmt.Errorf("encode living brief context: %w", err)
 	}
 
+	var candidate *domain.BriefContent
+	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[briefUpdateProposal, briefUpdateReceipt]{
+		Name:        briefUpdateTool,
+		Title:       "Propose living brief update",
+		Description: "Submit the complete proposed living brief. This records a draft only; it cannot confirm human decisions or overwrite locked confirmed topics.",
+		Execute: func(_ context.Context, proposal briefUpdateProposal, _ aisdk.ToolExecutionOptions) (briefUpdateReceipt, error) {
+			content := normalizeBrief(proposal.content())
+			if session.Brief != nil {
+				content = preserveConfirmedBrief(session.Brief.Content, content)
+			}
+			candidate = &content
+			return briefUpdateReceipt{Status: "draft_received", ChangeCount: len(content.Changes)}, nil
+		},
+	})
+	if err != nil {
+		return BriefResult{}, fmt.Errorf("create living brief tool: %w", err)
+	}
+
 	ctx, generationID := roleContext(ctx, session, roleCurator, parentGenerationIDs...)
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Curator()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithTools(aisdk.ToolSet{briefUpdateTool: tool}),
+		aisdk.WithToolChoice(provider.ToolChoice{Type: provider.ToolChoiceTool, ToolName: briefUpdateTool}),
+		aisdk.WithStopWhen(aisdk.StepCountIs(1)),
 		aisdk.WithMaxOutputTokens(6000),
 		aisdk.WithMaxRetries(1),
 	)
@@ -185,15 +329,10 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 	if err := stream.Err(); err != nil {
 		return BriefResult{}, fmt.Errorf("generate living brief: %w", err)
 	}
-	var brief domain.BriefContent
-	if err := json.Unmarshal([]byte(stripJSONFence(stream.Text())), &brief); err != nil {
-		return BriefResult{}, fmt.Errorf("decode living brief: %w", err)
+	if candidate == nil {
+		return BriefResult{}, fmt.Errorf("generate living brief: model did not call %s", briefUpdateTool)
 	}
-	content := normalizeBrief(brief)
-	if session.Brief != nil {
-		content = preserveConfirmedBrief(session.Brief.Content, content)
-	}
-	return BriefResult{Content: content, GenerationID: generationID}, nil
+	return BriefResult{Content: *candidate, GenerationID: generationID}, nil
 }
 
 func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brief domain.BriefContent, messages []domain.Message, parentGenerationIDs ...string) (EvaluationResult, error) {
@@ -228,6 +367,147 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 		return EvaluationResult{}, fmt.Errorf("decode requirement evaluation: %w", err)
 	}
 	return EvaluationResult{Evaluation: normalizeEvaluation(evaluation), GenerationID: generationID}, nil
+}
+
+func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, root string, onProgress func(string)) (PrototypeResult, error) {
+	if !s.Configured() {
+		return PrototypeResult{}, ErrNotConfigured
+	}
+	if session.Brief == nil || !session.Brief.Content.PrototypeOffer.Ready {
+		return PrototypeResult{}, errors.New("the living brief is not ready to prototype")
+	}
+	if onProgress != nil {
+		onProgress("Planning the demo application")
+		onProgress("Choosing the required services, telemetry, and files")
+	}
+	plan, planGenerationID, err := s.planPrototype(ctx, session)
+	if err != nil {
+		return PrototypeResult{}, err
+	}
+	if onProgress != nil {
+		onProgress("Plan complete. Starting code generation")
+	}
+	workspace, err := prototype.New(root)
+	if err != nil {
+		return PrototypeResult{}, err
+	}
+	if onProgress != nil {
+		onProgress("Created a local workspace for this iteration")
+	}
+
+	writeTool, err := aisdk.TypedTool(aisdk.TypedToolDef[writeDemoFileInput, domain.PrototypeArtifact]{
+		Name:        writeDemoFileTool,
+		Title:       "Write demo file",
+		Description: "Write one complete file inside the current local prototype revision.",
+		Execute: func(_ context.Context, input writeDemoFileInput, _ aisdk.ToolExecutionOptions) (domain.PrototypeArtifact, error) {
+			if onProgress != nil {
+				onProgress("Writing " + input.Path)
+			}
+			artifact, err := workspace.WriteFile(input.Path, input.Content)
+			return artifact, err
+		},
+	})
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("create prototype writer tool: %w", err)
+	}
+	var checks []domain.PrototypeCheck
+	validateTool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypeValidationInput, prototypeValidationOutput]{
+		Name:        validatePrototypeTool,
+		Title:       "Validate prototype",
+		Description: "Run the fixed local prototype checks. This does not start containers or deploy resources.",
+		Execute: func(toolCtx context.Context, _ prototypeValidationInput, _ aisdk.ToolExecutionOptions) (prototypeValidationOutput, error) {
+			if onProgress != nil {
+				onProgress("Running local validation checks")
+			}
+			checks = workspace.Validate(toolCtx)
+			return prototypeValidationOutput{Checks: checks}, nil
+		},
+	})
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("create prototype validation tool: %w", err)
+	}
+
+	payload, err := json.Marshal(struct {
+		Title string             `json:"title"`
+		Brief domain.LivingBrief `json:"livingBrief"`
+		Plan  prototypeBuildPlan `json:"implementationPlan"`
+	}{Title: session.Title, Brief: *session.Brief, Plan: plan})
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("encode prototype context: %w", err)
+	}
+	ctx, generationID := roleContext(ctx, session, roleBuilder, planGenerationID)
+	if onProgress != nil {
+		onProgress("Writing the planned application files")
+	}
+	stream := aisdk.StreamText(ctx, s.model,
+		aisdk.WithSystem(appPrompts.Builder()),
+		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithTools(aisdk.ToolSet{writeDemoFileTool: writeTool, validatePrototypeTool: validateTool}),
+		aisdk.WithStopWhen(aisdk.StepCountIs(40)),
+		aisdk.WithMaxOutputTokens(6000),
+		aisdk.WithMaxRetries(1),
+	)
+	for part := range stream.FullStream() {
+		if streamError, ok := part.(aisdk.StreamError); ok && streamError.Error != nil {
+			return PrototypeResult{}, fmt.Errorf("build prototype: %w", streamError.Error)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return PrototypeResult{}, fmt.Errorf("build prototype: %w", err)
+	}
+	if len(checks) == 0 {
+		return PrototypeResult{}, fmt.Errorf("build prototype: model did not call %s", validatePrototypeTool)
+	}
+	return PrototypeResult{
+		Summary:      sanitizeAssistantText(stream.Text()),
+		Artifacts:    workspace.Artifacts(),
+		Checks:       checks,
+		GenerationID: generationID,
+	}, nil
+}
+
+func (s *Service) planPrototype(ctx context.Context, session domain.Session) (prototypeBuildPlan, string, error) {
+	payload, err := json.Marshal(struct {
+		Title string             `json:"title"`
+		Brief domain.LivingBrief `json:"livingBrief"`
+	}{Title: session.Title, Brief: *session.Brief})
+	if err != nil {
+		return prototypeBuildPlan{}, "", fmt.Errorf("encode prototype planning context: %w", err)
+	}
+	var plan prototypeBuildPlan
+	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypeBuildPlan, prototypePlanReceipt]{
+		Name:        recordPrototypePlanTool,
+		Title:       "Record prototype implementation plan",
+		Description: "Record the complete, auditable implementation decision record before prototype files are written.",
+		Execute: func(_ context.Context, input prototypeBuildPlan, _ aisdk.ToolExecutionOptions) (prototypePlanReceipt, error) {
+			plan = input
+			return prototypePlanReceipt{Status: "recorded", FileCount: len(input.Files)}, nil
+		},
+	})
+	if err != nil {
+		return prototypeBuildPlan{}, "", fmt.Errorf("create prototype planning tool: %w", err)
+	}
+	ctx, generationID := roleContext(ctx, session, rolePrototypePlanner)
+	stream := aisdk.StreamText(ctx, s.model,
+		aisdk.WithSystem(appPrompts.PrototypePlanner()),
+		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithTools(aisdk.ToolSet{recordPrototypePlanTool: tool}),
+		aisdk.WithStopWhen(aisdk.StepCountIs(1)),
+		aisdk.WithMaxOutputTokens(6000),
+		aisdk.WithMaxRetries(1),
+	)
+	for part := range stream.FullStream() {
+		if streamError, ok := part.(aisdk.StreamError); ok && streamError.Error != nil {
+			return prototypeBuildPlan{}, generationID, fmt.Errorf("plan prototype: %w", streamError.Error)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return prototypeBuildPlan{}, generationID, fmt.Errorf("plan prototype: %w", err)
+	}
+	if strings.TrimSpace(plan.Summary) == "" || len(plan.Files) == 0 {
+		return prototypeBuildPlan{}, generationID, fmt.Errorf("prototype planner did not call %s with a complete plan", recordPrototypePlanTool)
+	}
+	return plan, generationID, nil
 }
 
 func stripJSONFence(value string) string {
@@ -310,11 +590,15 @@ func confirmedBriefFacts(brief *domain.LivingBrief) string {
 
 func roleContext(ctx context.Context, session domain.Session, role string, parentGenerationIDs ...string) (context.Context, string) {
 	generationID := agentobservability.NewGenerationID()
+	visibility := "internal"
 	ctx = agento11y.WithConversationID(ctx, session.ID)
 	ctx = agento11y.WithConversationTitle(ctx, session.Title)
+	if role == roleCollaborator {
+		visibility = "user"
+	}
 	ctx = agento11y.WithAgentName(ctx, observability.AgentName+"/"+role)
 	ctx = agento11y.WithAgentVersion(ctx, observability.AgentVersion)
-	ctx = agento11y.WithTags(ctx, map[string]string{"agent.role": role, "prompt.version": appPrompts.Version})
+	ctx = agento11y.WithTags(ctx, map[string]string{"agent.role": role, "generation.visibility": visibility, "prompt.version": appPrompts.Version})
 	ctx = agentobservability.WithGenerationID(ctx, generationID)
 	ctx = agentobservability.WithParentGenerationIDs(ctx, parentGenerationIDs...)
 	return ctx, generationID

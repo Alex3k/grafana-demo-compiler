@@ -1,4 +1,4 @@
-import type { BriefFocus, BriefThread, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefThread, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -34,6 +34,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  createPrototype: (sessionId: string) =>
+    json<PrototypeIteration>(`/api/sessions/${sessionId}/prototypes`, { method: "POST" }),
 };
 
 export async function streamMessage(
@@ -59,6 +61,10 @@ async function stream(path: string, content: string, onEvent: (event: StreamEven
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
+  return readStream(response, onEvent, new Set(["turn_completed", "error"]));
+}
+
+async function readStream(response: Response, onEvent: (event: StreamEvent) => void, terminalEvents: Set<string>): Promise<void> {
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(payload.error ?? `Request failed (${response.status})`);
@@ -83,7 +89,7 @@ async function stream(path: string, content: string, onEvent: (event: StreamEven
         event,
         data: JSON.parse(dataLine.slice(6)) as Message | Record<string, string>,
       });
-      if (event === "turn_completed" || event === "error") {
+      if (terminalEvents.has(event)) {
         await reader.cancel();
         return;
       }

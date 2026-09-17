@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,15 +20,16 @@ import (
 )
 
 type Server struct {
-	store *store.Store
-	chat  *chat.Service
-	o11y  *observability.Runtime
-	log   *slog.Logger
-	web   fs.FS
+	store         *store.Store
+	chat          *chat.Service
+	o11y          *observability.Runtime
+	log           *slog.Logger
+	web           fs.FS
+	prototypeRoot string
 }
 
-func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.Runtime, logger *slog.Logger, web fs.FS) http.Handler {
-	server := &Server{store: dataStore, chat: chatService, o11y: o11y, log: logger, web: web}
+func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.Runtime, logger *slog.Logger, prototypeRoot string, web fs.FS) http.Handler {
+	server := &Server{store: dataStore, chat: chatService, o11y: o11y, log: logger, web: web, prototypeRoot: prototypeRoot}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /api/sessions", server.listSessions)
@@ -35,6 +37,7 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 	mux.HandleFunc("GET /api/sessions/{id}", server.getSession)
 	mux.HandleFunc("PATCH /api/sessions/{id}", server.renameSession)
 	mux.HandleFunc("POST /api/sessions/{id}/messages", server.createMessage)
+	mux.HandleFunc("POST /api/sessions/{id}/prototypes", server.createPrototype)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads", server.openBriefThread)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/messages", server.createBriefThreadMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/confirm", server.confirmBriefThread)
@@ -45,6 +48,123 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 		mux.Handle("/", spaHandler(web))
 	}
 	return recoverMiddleware(logger, requestLogMiddleware(logger, mux))
+}
+
+func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
+	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		s.writeError(w, http.StatusNotFound, "Session not found", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not load session", err)
+		return
+	}
+	if session.Brief == nil || !session.Brief.Content.PrototypeOffer.Ready {
+		s.writeError(w, http.StatusConflict, "The living brief does not yet contain a prototype offer", nil)
+		return
+	}
+	if len(session.Prototypes) > 0 && session.Prototypes[0].Status == "generating" {
+		s.writeError(w, http.StatusConflict, "A prototype iteration is already running", nil)
+		return
+	}
+	iteration, err := s.store.CreatePrototypeIteration(r.Context(), session.ID, session.Brief.Version)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not create prototype iteration", err)
+		return
+	}
+	shortID := iteration.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	iteration.RootPath = filepath.Join(s.prototypeRoot, session.ID, "iterations", fmt.Sprintf("%03d-%s", iteration.Number, shortID))
+	iteration.Progress = append(iteration.Progress, "Queued for the background builder")
+	if err := s.store.UpdatePrototypeProgress(r.Context(), iteration); err != nil {
+		iteration.Status = "failed"
+		iteration.Error = err.Error()
+		_ = s.store.FinishPrototypeIteration(r.Context(), iteration)
+		s.writeError(w, http.StatusInternalServerError, "Could not prepare prototype generation", err)
+		return
+	}
+	operation, err := s.store.CreateOperation(r.Context(), domain.Operation{
+		SessionID: session.ID,
+		Kind:      "prototype_generation",
+		Status:    "running",
+		Summary:   fmt.Sprintf("Building prototype iteration %d", iteration.Number),
+	})
+	if err != nil {
+		iteration.Status = "failed"
+		iteration.Error = err.Error()
+		_ = s.store.FinishPrototypeIteration(r.Context(), iteration)
+		s.writeError(w, http.StatusInternalServerError, "Could not start prototype generation", err)
+		return
+	}
+	_, _ = s.store.CreateMessage(r.Context(), domain.Message{
+		SessionID: session.ID, Role: "system", Kind: "activity",
+		Content: fmt.Sprintf("Building local prototype iteration %d", iteration.Number), Status: "complete",
+	})
+	go s.runPrototype(session, iteration, operation)
+	writeJSON(w, http.StatusAccepted, iteration)
+}
+
+func (s *Server) runPrototype(session domain.Session, iteration domain.PrototypeIteration, operation domain.Operation) {
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancelBuild()
+	appendProgress := func(message string) {
+		if strings.TrimSpace(message) == "" || iteration.Progress[len(iteration.Progress)-1] == message {
+			return
+		}
+		iteration.Progress = append(iteration.Progress, message)
+		if len(iteration.Progress) > 100 {
+			iteration.Progress = iteration.Progress[len(iteration.Progress)-100:]
+		}
+		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.store.UpdatePrototypeProgress(persistCtx, iteration); err != nil {
+			s.log.Error("save prototype progress", "sessionId", session.ID, "iterationId", iteration.ID, "error", err)
+		}
+	}
+	result, buildErr := s.chat.BuildPrototype(buildCtx, session, iteration.RootPath, appendProgress)
+	iteration.Summary = result.Summary
+	iteration.Artifacts = result.Artifacts
+	iteration.Checks = result.Checks
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPersist()
+	if buildErr != nil {
+		iteration.Status = "failed"
+		iteration.Error = buildErr.Error()
+		appendProgress("Build failed: " + buildErr.Error())
+		s.log.Error("prototype generation failed", "sessionId", session.ID, "iterationId", iteration.ID, "error", buildErr)
+		_ = s.store.FinishOperation(persistCtx, operation.ID, "failed", "Prototype generation failed", buildErr.Error())
+	} else if failedPrototypeChecks(result.Checks) {
+		iteration.Status = "failed"
+		iteration.Error = "Prototype validation failed"
+		appendProgress("Prototype validation failed")
+		_ = s.store.FinishOperation(persistCtx, operation.ID, "failed", "Prototype validation failed", iteration.Error)
+	} else {
+		iteration.Status = "complete"
+		appendProgress("Prototype generated and validated")
+		_ = s.store.FinishOperation(persistCtx, operation.ID, "complete", "Prototype generated and validated", "")
+	}
+	if err := s.store.FinishPrototypeIteration(persistCtx, iteration); err != nil {
+		s.log.Error("save prototype iteration", "sessionId", session.ID, "iterationId", iteration.ID, "error", err)
+		iteration.Status = "failed"
+		iteration.Error = "Could not save prototype result"
+	}
+	completion := fmt.Sprintf("Prototype iteration %d %s", iteration.Number, iteration.Status)
+	_, _ = s.store.CreateMessage(persistCtx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: completion, Status: "complete"})
+}
+
+func failedPrototypeChecks(checks []domain.PrototypeCheck) bool {
+	if len(checks) == 0 {
+		return true
+	}
+	for _, check := range checks {
+		if check.Status != "passed" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
