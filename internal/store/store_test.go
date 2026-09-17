@@ -105,3 +105,58 @@ func TestBriefThreadPersistsOutsideMainConversation(t *testing.T) {
 		t.Fatal("confirmed thread was reused instead of creating a new draft")
 	}
 }
+
+func TestClaimDeploymentStartOnlySucceedsOnce(t *testing.T) {
+	ctx := context.Background()
+	dataStore, err := Open(ctx, filepath.Join(t.TempDir(), "compiler.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataStore.Close()
+
+	session, err := dataStore.CreateSession(ctx, "Camera fleet demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	iteration, err := dataStore.CreatePrototypeIteration(ctx, session.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment, err := dataStore.CreateDeployment(ctx, domain.Deployment{
+		SessionID:            session.ID,
+		PrototypeIterationID: iteration.ID,
+		Target:               "local",
+		Region:               "prod-us-east-0",
+		StackName:            "Demo Compiler",
+		StackSlug:            "democompilertest",
+		Status:               "needs_token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment.Status = "starting"
+	deployment.Progress = []string{"Telemetry token received securely"}
+
+	claimed, err := dataStore.ClaimDeploymentStart(ctx, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("first deployment start was not claimed")
+	}
+	claimed, err = dataStore.ClaimDeploymentStart(ctx, deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("second deployment start unexpectedly claimed the same deployment")
+	}
+
+	stored, err := dataStore.GetDeployment(ctx, session.ID, deployment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "starting" {
+		t.Fatalf("deployment status = %q, want starting", stored.Status)
+	}
+}

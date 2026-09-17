@@ -245,8 +245,8 @@ function App() {
     }
   }
 
-  async function submitTelemetryToken(deploymentId: string, token: string) {
-    if (!active || deploymentBusy) return;
+  async function submitTelemetryToken(deploymentId: string, token: string): Promise<boolean> {
+    if (!active || deploymentBusy) return false;
     const sessionId = active.id;
     setError("");
     try {
@@ -254,8 +254,10 @@ function App() {
       setActive((current) => current && current.id === sessionId
         ? { ...current, deployments: [deployment, ...(current.deployments ?? []).filter((item) => item.id !== deployment.id)] }
         : current);
+      return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The telemetry token could not be applied.");
+      return false;
     }
   }
 
@@ -373,7 +375,7 @@ function App() {
           prototypeProgress={prototypeActivity[prototypeActivity.length - 1] ?? ""}
           onBuildPrototype={() => void buildPrototype()}
           onDeployLocal={(region) => void deployLocal(region)}
-          onSubmitTelemetryToken={(deploymentId, token) => void submitTelemetryToken(deploymentId, token)}
+          onSubmitTelemetryToken={submitTelemetryToken}
         />
         {topicThread && active && (
           <TopicChat
@@ -567,14 +569,14 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
   );
 }
 
-function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => void }) {
+function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => Promise<boolean> }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
       {session?.brief && <PrototypeCard offer={session.brief.content.prototypeOffer} iteration={session.prototypes?.[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />}
-      {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
+      {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard key={session.id} session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
       <p className="eyebrow rail-section">LIVING BRIEF</p>
       {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
@@ -709,9 +711,10 @@ function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: L
   </div>;
 }
 
-function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { session: Session; deployment?: Deployment; onDeploy: (region: string) => void; onSubmitToken: (deploymentId: string, token: string) => void }) {
-  const [region, setRegion] = useState("");
+function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { session: Session; deployment?: Deployment; onDeploy: (region: string) => void; onSubmitToken: (deploymentId: string, token: string) => Promise<boolean> }) {
+  const [region, setRegion] = useState("prod-us-east-0");
   const [token, setToken] = useState("");
+  const [tokenSubmitting, setTokenSubmitting] = useState(false);
   const busy = deployment && ["provisioning", "starting", "verifying"].includes(deployment.status);
   const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted";
   const stackSlug = `democompiler${session.id.slice(0, 12).toLowerCase()}`;
@@ -738,17 +741,21 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
       <small>Creating a Grafana Cloud stack may incur usage costs. Delete protection remains enabled.</small>
     </form>}
 
-    {deployment?.status === "needs_token" && <form className="deployment-form token-form" onSubmit={(event) => {
+    {deployment?.status === "needs_token" && <form className="deployment-form token-form" onSubmit={async (event) => {
       event.preventDefault();
       const value = token.trim();
-      if (!value) return;
-      onSubmitToken(deployment.id, value);
-      setToken("");
+      if (!value || tokenSubmitting) return;
+      setTokenSubmitting(true);
+      try {
+        if (await onSubmitToken(deployment.id, value)) setToken("");
+      } finally {
+        setTokenSubmitting(false);
+      }
     }}>
-      <p>The stack is ready. Create an OTLP access-policy token with metrics, logs, and traces write scopes, then paste it here once.</p>
+      <p>The stack is ready. Create a Cloud Access Policy token with <code>stacks:read</code>, <code>metrics:write</code>, <code>logs:write</code>, and <code>traces:write</code>, then paste it here once.</p>
       <a href={tokenHelp} target="_blank" rel="noreferrer">Open OTLP connection setup ↗</a>
-      <label>OTLP access-policy token<input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="glc_…" autoComplete="off" /></label>
-      <button type="submit" disabled={!token.trim()}>Configure and start services</button>
+      <label>Cloud Access Policy token<input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="glc_…" autoComplete="off" /></label>
+      <button type="submit" disabled={tokenSubmitting || !token.trim()}>{tokenSubmitting ? "Checking token…" : "Configure and start services"}</button>
       <small>The token is written only to the prototype’s local <code>.env</code> file with owner-only permissions. It is not saved in the session database or chat.</small>
     </form>}
 

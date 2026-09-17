@@ -331,6 +331,28 @@ WHERE id = ? AND session_id = ?`, deployment.StackURL, deployment.OTLPEndpoint, 
 	return nil
 }
 
+func (s *Store) ClaimDeploymentStart(ctx context.Context, deployment domain.Deployment) (bool, error) {
+	if deployment.Progress == nil {
+		deployment.Progress = []string{}
+	}
+	progress, err := json.Marshal(deployment.Progress)
+	if err != nil {
+		return false, fmt.Errorf("encode deployment progress: %w", err)
+	}
+	deployment.UpdatedAt = time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE deployments SET status = ?, progress = ?, error = ?, updated_at = ?
+WHERE id = ? AND session_id = ? AND status = 'needs_token'`, deployment.Status, string(progress), deployment.Error, formatTime(deployment.UpdatedAt), deployment.ID, deployment.SessionID)
+	if err != nil {
+		return false, fmt.Errorf("claim deployment start: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check deployment start claim: %w", err)
+	}
+	return count == 1, nil
+}
+
 func (s *Store) GetDeployment(ctx context.Context, sessionID, deploymentID string) (domain.Deployment, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT id, session_id, prototype_iteration_id, target, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at

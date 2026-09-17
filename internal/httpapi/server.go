@@ -197,7 +197,54 @@ func (s *Server) configureDeploymentToken(w http.ResponseWriter, r *http.Request
 	item.Status = "starting"
 	item.Error = ""
 	item.Progress = append(item.Progress, "Telemetry token received securely; it will not be stored in the session database")
-	if err := s.store.UpdateDeployment(r.Context(), item); err != nil {
+	if item.OTLPEndpoint == "" {
+		item.Progress = append(item.Progress, "Resolving Grafana Cloud OTLP connection details")
+	}
+	claimCtx, cancelClaim := context.WithTimeout(context.Background(), 3*time.Second)
+	claimed, err := s.store.ClaimDeploymentStart(claimCtx, item)
+	cancelClaim()
+	if err != nil {
+		input.Token = ""
+		s.writeError(w, http.StatusInternalServerError, "Could not start local deployment", err)
+		return
+	}
+	if !claimed {
+		input.Token = ""
+		s.writeError(w, http.StatusConflict, "This deployment is already being configured", nil)
+		return
+	}
+	if item.OTLPEndpoint == "" {
+		resolveCtx, cancelResolve := context.WithTimeout(context.Background(), 30*time.Second)
+		endpoint, resolveErr := s.deployment.ResolveOTLP(resolveCtx, item.StackSlug, input.Token)
+		cancelResolve()
+		if resolveErr != nil {
+			input.Token = ""
+			item.Status = "needs_token"
+			item.Error = "Could not read this stack's OTLP connection details. Check that the token includes stacks:read and retry."
+			item.Progress = append(item.Progress, item.Error)
+			persistCtx, cancelPersist := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancelPersist()
+			if err := s.store.UpdateDeployment(persistCtx, item); err != nil {
+				s.log.Error("save OTLP resolution failure", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
+			}
+			s.writeError(w, http.StatusBadGateway, "Could not read this stack's OTLP connection details. Check the Cloud Access Policy token and retry.", resolveErr)
+			return
+		}
+		item.OTLPEndpoint = endpoint
+		item.Progress = append(item.Progress, "Grafana Cloud OTLP connection details resolved")
+	}
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 3*time.Second)
+	err = s.store.UpdateDeployment(persistCtx, item)
+	cancelPersist()
+	if err != nil {
+		item.Status = "needs_token"
+		item.Error = "Could not save the Grafana Cloud connection details. Retry the token when the deployment is ready."
+		restoreCtx, cancelRestore := context.WithTimeout(context.Background(), 3*time.Second)
+		restoreErr := s.store.UpdateDeployment(restoreCtx, item)
+		cancelRestore()
+		if restoreErr != nil {
+			s.log.Error("restore deployment after connection save failure", "sessionId", item.SessionID, "deploymentId", item.ID, "error", restoreErr)
+		}
 		s.writeError(w, http.StatusInternalServerError, "Could not start local deployment", err)
 		return
 	}
@@ -218,7 +265,7 @@ func (s *Server) runLocalDeployment(item domain.Deployment, root, token string) 
 		defer cancelPersist()
 		_ = s.store.UpdateDeployment(persistCtx, item)
 	}
-	err := s.deployment.StartLocal(ctx, root, item.OTLPEndpoint, item.InstanceID, token, item.ID, appendProgress)
+	err := s.deployment.StartLocal(ctx, root, item.OTLPEndpoint, item.InstanceID, token, item.SessionID, appendProgress)
 	token = ""
 	if err != nil {
 		item.Status = "failed"

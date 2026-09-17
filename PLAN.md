@@ -839,10 +839,75 @@ Milestone 1 does not claim live Grafana telemetry delivery.
 
 ## Later delivery steps
 
-These steps remain part of the MVP direction but will be refined before their
-implementation milestone begins.
+These steps extend the working Steps 1 through 4 into a complete, observable,
+and verified demo. They use a small number of bounded agents coordinated by Go.
+The agents do not form an open-ended group chat and do not pass informal prose
+between one another. Each agent receives approved, persisted artifacts, owns one
+result, and returns a versioned artifact with evidence.
+
+The execution model is:
+
+```mermaid
+flowchart TD
+    H[Human] <--> C[Collaborator role]
+    C --> B[Living brief]
+    B --> CU[Curator role]
+    CU --> B
+    B --> E1[Requirement Evaluator role]
+
+    B --> AB[Application Builder agent]
+    AB --> AM[Application manifest]
+    AB --> TC[Telemetry catalogue]
+
+    AM --> R[Local Docker Compose runtime]
+    R --> SC[Per-session Grafana Cloud stack]
+
+    B --> SD[Scenario and Data agent]
+    AM --> SD
+    SD --> SM[Scenario and workload manifest]
+    SD --> R
+
+    B --> GA[Grafana Resource agent]
+    TC --> GA
+    SM --> GA
+    GA --> SK[Versioned gcx skills]
+    GA --> GCX[Controlled gcx tool]
+    GCX --> SC
+    GA --> GM[Grafana resource manifest]
+
+    TC --> VA[Verification agent]
+    SM --> VA
+    GM --> VA
+    VA --> GCX
+    VA --> VR[Evidence-backed verification report]
+    VR --> E2[Requirement Evaluator role]
+    E2 --> H
+```
+
+The planning components remain roles: they provide one focused judgment when
+Go invokes them. Application building, scenario generation, Grafana resource
+work, and verification are agents because each owns a bounded result and may
+iterate over tools until that result succeeds or fails with evidence.
+
+The shared artifact chain is:
+
+1. confirmed living brief and narrative;
+2. application manifest and telemetry catalogue;
+3. scenario and workload manifest;
+4. Grafana resource manifest;
+5. verification report;
+6. final requirement-alignment evaluation.
+
+Later feedback may re-enter the chain at the narrowest affected point. A
+dashboard wording change must not rebuild the application. A new signal may
+require an application or scenario iteration before the Grafana resource is
+updated.
 
 ### Step 5: Per-session Grafana Cloud stack and live telemetry
+
+This remains deterministic Go orchestration rather than an agent-owned task.
+Authentication, credentials, stack targeting, and deployment state are product
+responsibilities and must not be delegated to a model.
 
 - Ask `gcx` to create one dedicated Grafana Cloud stack for the demo session.
 - Store the stack identity and generated `gcx` context reference without
@@ -853,11 +918,75 @@ implementation milestone begins.
 - Verify through `gcx` that the expected metrics, logs, and traces have arrived.
 - Show missing signals by service and signal type.
 - Keep the central Agent Observability stack separate from the demo stack.
+- Produce a telemetry catalogue from the generated manifest and observed
+  signals. Record service names, signal names, useful dimensions, correlation
+  fields, and whether each signal has been observed in the session stack.
+
+The telemetry catalogue is the contract between application generation,
+scenario generation, Grafana resource creation, and verification. Grafana
+resources must not query signals merely because the model expects them to
+exist.
 
 Meaningful outcome: the local application is observable in an isolated stack
-created and managed through `gcx`; the user only needs `gcx` configured.
+created and managed through `gcx`; the user only needs `gcx` configured, and
+later agents have an explicit catalogue of the telemetry they can use.
 
-### Step 6: User-driven Grafana artifacts
+### Step 6: Grafana Resource agent and user-driven artifacts
+
+#### Agent responsibility
+
+The Grafana Resource agent owns this bounded outcome:
+
+> Create and iterate only the Grafana resources agreed in the living brief,
+> using `gcx`, until they are valid and support the demo narrative.
+
+It receives the confirmed brief, ten-minute narrative, proof points, telemetry
+catalogue, scenario manifest when available, current Grafana artifacts, and
+previous validation results. It does not receive the entire raw conversation
+as its primary context.
+
+#### Versioned `gcx` skills
+
+Demo Compiler provides an approved, pinned set of `gcx` skills. Skills are
+loaded on demand rather than placing every Grafana playbook in every prompt.
+Initial candidates are dashboard creation and management, with alert and SLO
+skills loaded only when the accepted brief requires those resources.
+
+Every skill load records the skill name, version, selection reason, session,
+and iteration. Pinning makes a demo revision reproducible when skills evolve.
+
+#### General-purpose tool surface
+
+The agent uses a small reusable tool surface rather than one tool per Grafana
+feature:
+
+- `load_skill` loads an approved versioned skill by identifier;
+- `workspace_file` reads and writes only inside the active iteration's Grafana
+  artifact directory;
+- `run_gcx` accepts a structured argument array and purpose, invokes `gcx`
+  without a shell, and returns a bounded structured result.
+
+`run_gcx` is the Grafana domain tool. The skills explain how to use it well.
+The product must not duplicate `gcx` with separate model tools for dashboards,
+alerts, SLOs, metric queries, log queries, traces, or every future Grafana
+feature.
+
+#### Go-enforced trust boundary
+
+The backend enforces the following independently of the prompt:
+
+- pin every operation to the current session's Grafana Cloud stack;
+- prevent the agent from targeting the central Agent Observability stack;
+- reject login, logout, context mutation, shell syntax, and unrelated binaries;
+- keep credentials out of model context, tool arguments, stored output, and
+  Agent Observability attributes;
+- constrain file access to the current iteration workspace;
+- bound command duration and output size;
+- require explicit human approval before deletion;
+- record the sanitized arguments, purpose, affected resource, result, duration,
+  session, and iteration for every call.
+
+#### Resource workflow
 
 - Convert the agreed resource proposal into resource definitions.
 - Discover actual datasources and identifiers through `gcx`.
@@ -866,36 +995,97 @@ created and managed through `gcx`; the user only needs `gcx` configured.
 - Require approval before mutation.
 - Create only the approved dashboards, alerts, SLOs, or other resources.
 - Read resources back through `gcx` and connect them to narrative proof points.
+- Inspect rendered or queried results when the selected skill supports it.
+- Iterate only the affected resources in response to focused human feedback.
+- Persist source artifacts, skill versions, `gcx` operations, resource IDs and
+  URLs, decision records, validation evidence, and confirmation status in a
+  Grafana resource manifest.
 
 There is no default quota such as one dashboard, one alert, and one SLO. The
 assistant recommends the smallest useful set, and explicit user requests can
 expand it.
 
+The first implementation slice proves the generic design with one requested
+dashboard. The agent loads the dashboard skill, discovers real signals, writes
+and validates the artifact, applies it to the session stack, inspects the
+result, and presents its URL and proof-point mapping. Supporting one dashboard
+first must not introduce a dashboard-specific execution API.
+
+#### Step 6 acceptance criteria
+
+- The agent creates a requested dashboard using a pinned skill and controlled
+  `gcx` access.
+- Queries use signals present in the telemetry catalogue and observed where
+  the proof point requires live data.
+- No unrelated panels or resources are added.
+- Every operation targets the correct per-session stack.
+- The human can iterate a Grafana resource without regenerating the application.
+- Confirmed resources remain locked until the human explicitly requests a
+  change.
+- The complete skill, decision, tool, validation, and result sequence is
+  inspectable in Agent Observability.
+
 Meaningful outcome: the demo has a focused Grafana experience that supports its
 story without resource sprawl.
 
-### Step 7: Scenario and presenter experience
+### Step 7: Scenario/Data agent and presenter experience
+
+The Scenario and Data agent owns repeatable activity that makes the agreed
+story visible. It receives the brief and application manifest, then chooses the
+smallest suitable mechanism:
+
+- real application calls for executable behavior such as logins, transactions,
+  or database queries;
+- simulation for physical devices, cameras, sensors, or machinery that cannot
+  literally run in Docker Compose;
+- k6 when concurrency, rate, duration, or repeatable load matters;
+- a simpler deterministic script when k6 would add no value.
+
+It must not expand the simulated domain beyond the proof points. A banking demo
+about transaction correlation does not need a loan ecosystem; a camera demo
+may simulate devices while still sending their events through real Go services.
 
 - Refine realistic traffic or sensor generation.
 - Make trigger, diagnosis, recovery, and reset deterministic.
+- Persist a scenario manifest containing the baseline, trigger, expected
+  effect, load mechanism and reason, recovery, reset, and expected signals.
+- Run the scenario against the local application and report evidence or failure.
 - Produce a timed presenter runbook capped at ten minutes.
 - Include talking points, screen actions, transitions, expected evidence, and
   recovery notes.
 - Provide a rehearsal mode that walks through the sequence without changing the
   accepted revision.
 
+Scenario feedback may cause a targeted application or workload iteration. New
+or changed telemetry then flows back through the catalogue and only the affected
+Grafana resources are reconsidered.
+
 Meaningful outcome: the environment becomes a repeatable presentation rather
 than merely an observable application.
 
-### Step 8: End-to-end verification
+### Step 8: Verification agent and end-to-end evaluation
+
+The Verification agent gathers evidence; it does not make the final product
+judgment and does not silently repair the application. It receives the
+confirmed brief, application manifest, telemetry catalogue, scenario manifest,
+Grafana resource manifest, and read-oriented `gcx` access.
 
 - Exercise the application journey and demo scenario.
 - Verify required metrics, logs, and traces through `gcx`.
 - Verify each approved Grafana resource exists and supports its proof point.
+- Verify promised cross-signal correlation and investigation paths.
+- Attribute a failure to missing telemetry, an invalid Grafana resource, a
+  scenario problem, or an environmental problem so the workflow returns to the
+  narrowest responsible agent or deterministic operation.
 - Rehearse or inspect the timed narrative against the ten-minute limit.
-- Run the single requirement-alignment evaluation against the completed demo.
 - Produce an evidence-backed report of passes, failures, limitations, and links.
+- Run the existing Requirement Evaluator role against that report and the
+  confirmed brief.
 - Transition to `Verified` only when required checks and the evaluation pass.
+
+The separation is deliberate: the Verification agent uses tools to collect
+evidence, while the Requirement Evaluator role answers whether that evidence
+shows the completed demo meets the human's requirement.
 
 Meaningful outcome: the user has evidence that the demo answers the agreed
 requirement.
@@ -908,7 +1098,13 @@ requirement.
 - Rebuild locally without mutating the historical revision.
 - Preview the Grafana reconciliation required by a new accepted revision.
 - Require fresh approval before create, update, or delete operations.
-- Preserve reconciliation and verification evidence.
+- Preserve application manifests, telemetry catalogues, scenario manifests,
+  Grafana artifacts, skill versions, `gcx` operations, reconciliation results,
+  and verification evidence.
+
+Restoring an earlier revision creates a new draft. It does not silently revert
+live Grafana resources. The product first produces a reconciliation preview and
+requires approval for the resulting create, update, or delete operations.
 
 Meaningful outcome: the user can safely return days later, explore a different
 direction, and understand what changed.
@@ -923,10 +1119,14 @@ forcing every demo into the same story. The compiler standardizes:
 - Mermaid architecture storage and rendering;
 - generated Go service, MySQL, Alloy, Docker, health, and scenario conventions;
 - artifact manifests and iteration summaries;
+- bounded agent responsibilities and structured hand-off artifacts;
+- pinned skill versions and the general-purpose agent tool boundary;
 - local-only deployment enforcement;
 - progress, evidence, and validation records;
 - narrative structure and the ten-minute constraint;
-- `gcx` preview, approval, creation, and verification boundaries.
+- controlled `gcx` execution, preview, approval, creation, and verification
+  boundaries;
+- requirement-to-resource and requirement-to-evidence traceability.
 
 It does not standardize the user's domain, desired outcome, service names,
 failure mode, key telemetry, or Grafana resource set. Those remain driven by
@@ -937,6 +1137,11 @@ the requested demo.
 - Never persist tokens or credentials in conversation text, generated source,
   artifact manifests, progress events, or Agent Observability attributes.
 - Use existing `gcx` contexts and supported credential handling.
+- Expose `gcx` to agents through a structured argument-array runner, never an
+  arbitrary shell command.
+- Pin agent `gcx` operations to the current session stack and prevent access to
+  the central Agent Observability stack.
+- Do not allow agents to run `gcx` authentication or context-mutation commands.
 - Redact likely secrets from displayed logs and stored error excerpts.
 - Constrain file generation and Docker operations to the active session project.
 - Do not expose an arbitrary command-execution endpoint.
@@ -957,6 +1162,9 @@ These choices are intentionally not treated as approved requirements yet:
   behind a Compose profile until Step 5 configures the demo stack;
 - the exact `gcx` command sequence and naming convention for creating a
   per-session Grafana Cloud stack;
+- how approved `gcx` skills are packaged and versioned with Demo Compiler;
+- the exact structured output schema and command allow/deny policy for the
+  controlled `run_gcx` tool;
 - whether three services is also the default, with additional services added
   only when the story requires them.
 
@@ -1004,3 +1212,29 @@ scope boundary requires human confirmation and a decision-log entry.
 - Use Grafana's Go AI SDK Bedrock provider and its provider-neutral
   `middleware/agentobservability` streaming integration instead of calling the
   AWS Bedrock SDK and manually recording generations.
+
+### 2026-09-17
+
+- Keep the Collaborator, Curator, and Requirement Evaluator as model roles
+  invoked by deterministic Go orchestration.
+- Treat application building, scenario/data generation, Grafana resource work,
+  and runtime verification as bounded agents because they own results and may
+  iterate over tools.
+- Keep stack creation, authentication, credential handling, session targeting,
+  local runtime control, and revision persistence deterministic in Go.
+- Use approved, pinned `gcx` skills as the Grafana Resource agent's operational
+  playbooks.
+- Give the Grafana Resource agent controlled access to `gcx` rather than
+  implementing one model tool for every Grafana feature and query capability.
+- Use a small general-purpose tool surface: skill loading, scoped workspace
+  files, and a structured non-shell `gcx` runner.
+- Require the Grafana Resource agent to consume an actual telemetry catalogue
+  and create only resources that support confirmed requests or proof points.
+- Start the Grafana-agent implementation with one requested dashboard while
+  retaining the generic `gcx` and skill architecture.
+- Add a Scenario and Data agent that chooses between real application traffic,
+  physical-domain simulation, k6, and simpler scripts according to the demo.
+- Separate evidence gathering by the Verification agent from the final
+  requirement judgment performed by the Requirement Evaluator role.
+- Record explicit decision records and tool evidence in Agent Observability;
+  do not depend on private chain-of-thought for administrative inspection.
