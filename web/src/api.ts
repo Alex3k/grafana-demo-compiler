@@ -1,4 +1,4 @@
-import type { BriefFocus, BriefThread, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefThread, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -36,6 +36,16 @@ export const api = {
     }),
   createPrototype: (sessionId: string) =>
     json<PrototypeIteration>(`/api/sessions/${sessionId}/prototypes`, { method: "POST" }),
+  createDeployment: (sessionId: string, organization: string, region: string) =>
+    json<Deployment>(`/api/sessions/${sessionId}/deployments`, {
+      method: "POST",
+      body: JSON.stringify({ target: "local", organization, region }),
+    }),
+  configureDeploymentToken: (sessionId: string, deploymentId: string, token: string) =>
+    json<Deployment>(`/api/sessions/${sessionId}/deployments/${deploymentId}/token`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
 };
 
 export async function streamMessage(

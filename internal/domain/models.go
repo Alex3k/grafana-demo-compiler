@@ -3,14 +3,34 @@ package domain
 import "time"
 
 type Session struct {
-	ID         string               `json:"id"`
-	Title      string               `json:"title"`
-	State      string               `json:"state"`
-	CreatedAt  time.Time            `json:"createdAt"`
-	UpdatedAt  time.Time            `json:"updatedAt"`
-	Messages   []Message            `json:"messages,omitempty"`
-	Brief      *LivingBrief         `json:"brief,omitempty"`
-	Prototypes []PrototypeIteration `json:"prototypes,omitempty"`
+	ID          string               `json:"id"`
+	Title       string               `json:"title"`
+	State       string               `json:"state"`
+	CreatedAt   time.Time            `json:"createdAt"`
+	UpdatedAt   time.Time            `json:"updatedAt"`
+	Messages    []Message            `json:"messages,omitempty"`
+	Brief       *LivingBrief         `json:"brief,omitempty"`
+	Prototypes  []PrototypeIteration `json:"prototypes,omitempty"`
+	Deployments []Deployment         `json:"deployments,omitempty"`
+}
+
+type Deployment struct {
+	ID                   string    `json:"id"`
+	SessionID            string    `json:"sessionId"`
+	PrototypeIterationID string    `json:"prototypeIterationId"`
+	Target               string    `json:"target"`
+	Organization         string    `json:"organization"`
+	Region               string    `json:"region"`
+	StackName            string    `json:"stackName"`
+	StackSlug            string    `json:"stackSlug"`
+	StackURL             string    `json:"stackUrl,omitempty"`
+	OTLPEndpoint         string    `json:"otlpEndpoint,omitempty"`
+	InstanceID           string    `json:"instanceId,omitempty"`
+	Status               string    `json:"status"`
+	Progress             []string  `json:"progress"`
+	Error                string    `json:"error,omitempty"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
 type PrototypeArtifact struct {

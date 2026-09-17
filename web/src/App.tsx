@@ -3,7 +3,7 @@ import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, streamBriefThreadMessage, streamMessage } from "./api";
-import type { BriefFocus, BriefItem, BriefThread, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefItem, BriefThread, Deployment, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
@@ -40,6 +40,8 @@ function App() {
   const activePrototype = active?.prototypes?.[0];
   const prototypeBusy = activePrototype?.status === "generating";
   const prototypeActivity = activePrototype?.progress ?? [];
+  const activeDeployment = active?.deployments?.[0];
+  const deploymentBusy = activeDeployment?.status === "provisioning" || activeDeployment?.status === "starting" || activeDeployment?.status === "verifying";
 
   useEffect(() => {
     void Promise.all([api.sessions(), api.health()])
@@ -91,6 +93,34 @@ function App() {
     timer = window.setTimeout(poll, 500);
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [active?.id, activePrototype?.id, activePrototype?.status]);
+
+  useEffect(() => {
+    if (!active || !activeDeployment || !deploymentBusy) return;
+    const sessionId = active.id;
+    const deploymentId = activeDeployment.id;
+    let stopped = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await api.session(sessionId);
+        if (stopped) return;
+        setActive((current) => current?.id === sessionId ? next : current);
+        const deployment = next.deployments?.find((item) => item.id === deploymentId);
+        if (deployment && ["provisioning", "starting", "verifying"].includes(deployment.status)) {
+          timer = window.setTimeout(poll, 1200);
+        } else {
+          await refreshSessions();
+        }
+      } catch (reason) {
+        if (!stopped) {
+          setError(reason instanceof Error ? reason.message : "Could not refresh deployment progress.");
+          timer = window.setTimeout(poll, 2500);
+        }
+      }
+    };
+    timer = window.setTimeout(poll, 500);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [active?.id, activeDeployment?.id, activeDeployment?.status, deploymentBusy]);
 
   async function refreshSessions() {
     const items = await api.sessions();
@@ -198,6 +228,34 @@ function App() {
       await refreshSessions();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The prototype could not be generated.");
+    }
+  }
+
+  async function deployLocal(organization: string, region: string) {
+    if (!active || deploymentBusy) return;
+    const sessionId = active.id;
+    setError("");
+    try {
+      const deployment = await api.createDeployment(sessionId, organization, region);
+      setActive((current) => current && current.id === sessionId
+        ? { ...current, deployments: [deployment, ...(current.deployments ?? []).filter((item) => item.id !== deployment.id)] }
+        : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The local deployment could not be started.");
+    }
+  }
+
+  async function submitTelemetryToken(deploymentId: string, token: string) {
+    if (!active || deploymentBusy) return;
+    const sessionId = active.id;
+    setError("");
+    try {
+      const deployment = await api.configureDeploymentToken(sessionId, deploymentId, token);
+      setActive((current) => current && current.id === sessionId
+        ? { ...current, deployments: [deployment, ...(current.deployments ?? []).filter((item) => item.id !== deployment.id)] }
+        : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The telemetry token could not be applied.");
     }
   }
 
@@ -314,6 +372,8 @@ function App() {
           prototypeBusy={prototypeBusy}
           prototypeProgress={prototypeActivity[prototypeActivity.length - 1] ?? ""}
           onBuildPrototype={() => void buildPrototype()}
+          onDeployLocal={(organization, region) => void deployLocal(organization, region)}
+          onSubmitTelemetryToken={(deploymentId, token) => void submitTelemetryToken(deploymentId, token)}
         />
         {topicThread && active && (
           <TopicChat
@@ -507,13 +567,14 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
   );
 }
 
-function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void }) {
+function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype, onDeployLocal, onSubmitTelemetryToken }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onDeployLocal: (organization: string, region: string) => void; onSubmitTelemetryToken: (deploymentId: string, token: string) => void }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
       {session?.brief && <PrototypeCard offer={session.brief.content.prototypeOffer} iteration={session.prototypes?.[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />}
+      {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
       <p className="eyebrow rail-section">LIVING BRIEF</p>
       {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
@@ -646,6 +707,57 @@ function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: L
       {iteration.rootPath && <details className="prototype-path"><summary>Local output path</summary><code>{iteration.rootPath}</code></details>}
     </div>}
   </div>;
+}
+
+function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { session: Session; deployment?: Deployment; onDeploy: (organization: string, region: string) => void; onSubmitToken: (deploymentId: string, token: string) => void }) {
+  const [organization, setOrganization] = useState("");
+  const [region, setRegion] = useState("");
+  const [token, setToken] = useState("");
+  const busy = deployment && ["provisioning", "starting", "verifying"].includes(deployment.status);
+  const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted";
+  const stackSlug = `democompiler${session.id.slice(0, 12).toLowerCase()}`;
+  const stackName = `${session.title} demo ${session.id.slice(0, 12)}`;
+  const progress = deployment?.progress?.at(-1);
+  const tokenHelp = deployment?.instanceId
+    ? `https://grafana.com/orgs/${encodeURIComponent(deployment.organization)}/stacks/${encodeURIComponent(deployment.instanceId)}/otlp-info`
+    : "https://grafana.com";
+
+  return <section className={`deployment-card status-${deployment?.status ?? "ready"}`}>
+    <span>LOCAL DEPLOYMENT</span>
+    {!deployment && <p>Create one dedicated Grafana Cloud stack, then run this prototype locally with Docker Compose.</p>}
+    {deployment && <div className="deployment-status"><strong>{deployment.status.replaceAll("_", " ")}</strong>{progress && <small>{busy && <span className="activity-pulse" />}{progress}</small>}</div>}
+    {deployment?.stackUrl && <a className="deployment-stack-link" href={deployment.stackUrl} target="_blank" rel="noreferrer">Open {deployment.stackSlug} ↗</a>}
+    {deployment?.error && <p className="deployment-error">{deployment.error}</p>}
+
+    {canRetry && <form className="deployment-form" onSubmit={(event) => {
+      event.preventDefault();
+      if (organization.trim() && region.trim()) onDeploy(organization.trim(), region.trim());
+    }}>
+      <label>Grafana Cloud organization<input value={organization} onChange={(event) => setOrganization(event.target.value)} placeholder="organization slug" autoComplete="off" /></label>
+      <label>Grafana Cloud region<input value={region} onChange={(event) => setRegion(event.target.value)} placeholder="for example prod-gb-south-0" autoComplete="off" /></label>
+      <div className="deployment-confirm"><small>Application target</small><strong>Local Docker Compose only</strong></div>
+      <div className="deployment-confirm"><small>Stack name</small><strong>{stackName}</strong></div>
+      <div className="deployment-confirm"><small>New stack</small><code>{stackSlug}.grafana.net</code></div>
+      <button type="submit" disabled={!organization.trim() || !region.trim()}>Create stack and deploy locally</button>
+      <small>Creating a Grafana Cloud stack may incur usage costs. Delete protection remains enabled.</small>
+    </form>}
+
+    {deployment?.status === "needs_token" && <form className="deployment-form token-form" onSubmit={(event) => {
+      event.preventDefault();
+      const value = token.trim();
+      if (!value) return;
+      onSubmitToken(deployment.id, value);
+      setToken("");
+    }}>
+      <p>The stack is ready. Create an OTLP access-policy token with metrics, logs, and traces write scopes, then paste it here once.</p>
+      <a href={tokenHelp} target="_blank" rel="noreferrer">Open OTLP connection setup ↗</a>
+      <label>OTLP access-policy token<input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="glc_…" autoComplete="off" /></label>
+      <button type="submit" disabled={!token.trim()}>Configure and start services</button>
+      <small>The token is written only to the prototype’s local <code>.env</code> file with owner-only permissions. It is not saved in the session database or chat.</small>
+    </form>}
+
+    {(deployment?.status === "running" || deployment?.status === "verified") && <div className="deployment-running"><strong>Docker Compose is {deployment.status}</strong><small>The Grafana Cloud stack is preserved when local services stop.</small></div>}
+  </section>;
 }
 
 function AlignmentCard({ acceptance }: { acceptance: LivingBrief["content"]["acceptance"] }) {

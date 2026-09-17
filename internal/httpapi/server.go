@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/chat"
+	"github.com/Alex3k/grafana-demo-compiler/internal/deployment"
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
@@ -26,10 +27,11 @@ type Server struct {
 	log           *slog.Logger
 	web           fs.FS
 	prototypeRoot string
+	deployment    *deployment.Runner
 }
 
 func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.Runtime, logger *slog.Logger, prototypeRoot string, web fs.FS) http.Handler {
-	server := &Server{store: dataStore, chat: chatService, o11y: o11y, log: logger, web: web, prototypeRoot: prototypeRoot}
+	server := &Server{store: dataStore, chat: chatService, o11y: o11y, log: logger, web: web, prototypeRoot: prototypeRoot, deployment: deployment.New()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /api/sessions", server.listSessions)
@@ -38,6 +40,8 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 	mux.HandleFunc("PATCH /api/sessions/{id}", server.renameSession)
 	mux.HandleFunc("POST /api/sessions/{id}/messages", server.createMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/prototypes", server.createPrototype)
+	mux.HandleFunc("POST /api/sessions/{id}/deployments", server.createDeployment)
+	mux.HandleFunc("POST /api/sessions/{id}/deployments/{deploymentID}/token", server.configureDeploymentToken)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads", server.openBriefThread)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/messages", server.createBriefThreadMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/confirm", server.confirmBriefThread)
@@ -48,6 +52,211 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 		mux.Handle("/", spaHandler(web))
 	}
 	return recoverMiddleware(logger, requestLogMiddleware(logger, mux))
+}
+
+func (s *Server) createDeployment(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Target       string `json:"target"`
+		Organization string `json:"organization"`
+		Region       string `json:"region"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid deployment request", err)
+		return
+	}
+	input.Target = strings.TrimSpace(strings.ToLower(input.Target))
+	input.Organization = strings.TrimSpace(input.Organization)
+	input.Region = strings.TrimSpace(input.Region)
+	if input.Target != "local" {
+		s.writeError(w, http.StatusUnprocessableEntity, "This MVP only deploys application services locally with Docker Compose", nil)
+		return
+	}
+	if input.Organization == "" || input.Region == "" {
+		s.writeError(w, http.StatusBadRequest, "Grafana Cloud organization and region are required", nil)
+		return
+	}
+	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		s.writeError(w, http.StatusNotFound, "Session not found", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not load session", err)
+		return
+	}
+	prototype := latestCompletePrototype(session.Prototypes)
+	if prototype == nil {
+		s.writeError(w, http.StatusConflict, "Generate and validate a prototype before deploying it", nil)
+		return
+	}
+	for _, existing := range session.Deployments {
+		if existing.Status == "provisioning" || existing.Status == "needs_token" || existing.Status == "starting" || existing.Status == "running" || existing.Status == "verifying" || existing.Status == "verified" {
+			s.writeError(w, http.StatusConflict, "This session already has an active local deployment", nil)
+			return
+		}
+	}
+	shortID := session.ID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+	stackSlug := "democompiler" + strings.ToLower(shortID)
+	stackName := session.Title + " demo " + shortID
+	item, err := s.store.CreateDeployment(r.Context(), domain.Deployment{
+		SessionID: session.ID, PrototypeIterationID: prototype.ID,
+		Target: "local", Organization: input.Organization, Region: input.Region,
+		StackName: stackName, StackSlug: stackSlug, Status: "provisioning",
+		Progress: []string{"Deployment accepted: local Docker Compose only"},
+	})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not create deployment", err)
+		return
+	}
+	go s.runStackProvisioning(item)
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+func latestCompletePrototype(iterations []domain.PrototypeIteration) *domain.PrototypeIteration {
+	for index := range iterations {
+		if iterations[index].Status == "complete" {
+			return &iterations[index]
+		}
+	}
+	return nil
+}
+
+func (s *Server) runStackProvisioning(item domain.Deployment) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	appendProgress := func(message string) {
+		if strings.TrimSpace(message) == "" || (len(item.Progress) > 0 && item.Progress[len(item.Progress)-1] == message) {
+			return
+		}
+		item.Progress = append(item.Progress, message)
+		persistCtx, cancelPersist := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelPersist()
+		if err := s.store.UpdateDeployment(persistCtx, item); err != nil {
+			s.log.Error("save deployment progress", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
+		}
+	}
+	stack, err := s.deployment.Provision(ctx, item.Organization, item.Region, item.StackName, item.StackSlug, appendProgress)
+	if err != nil {
+		item.Status = "failed"
+		item.Error = err.Error()
+		appendProgress("Stack provisioning stopped: " + actionableGCXError(err))
+	} else {
+		item.StackURL, item.OTLPEndpoint, item.InstanceID = stack.URL, stack.OTLPEndpoint, stack.InstanceID
+		item.Status = "needs_token"
+		appendProgress("Grafana Cloud stack is ready; an OTLP access-policy token is required")
+	}
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPersist()
+	if err := s.store.UpdateDeployment(persistCtx, item); err != nil {
+		s.log.Error("finish stack provisioning", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
+	}
+}
+
+func (s *Server) configureDeploymentToken(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Token string `json:"token"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid token request", err)
+		return
+	}
+	item, err := s.store.GetDeployment(r.Context(), r.PathValue("id"), r.PathValue("deploymentID"))
+	if errors.Is(err, store.ErrNotFound) {
+		s.writeError(w, http.StatusNotFound, "Deployment not found", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not load deployment", err)
+		return
+	}
+	if item.Status != "needs_token" {
+		s.writeError(w, http.StatusConflict, "This deployment is not waiting for a telemetry token", nil)
+		return
+	}
+	if strings.TrimSpace(input.Token) == "" {
+		s.writeError(w, http.StatusBadRequest, "An OTLP access-policy token is required", nil)
+		return
+	}
+	session, err := s.store.GetSession(r.Context(), item.SessionID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not load deployment session", err)
+		return
+	}
+	var iteration *domain.PrototypeIteration
+	for index := range session.Prototypes {
+		if session.Prototypes[index].ID == item.PrototypeIterationID {
+			iteration = &session.Prototypes[index]
+			break
+		}
+	}
+	if iteration == nil || !pathWithin(s.prototypeRoot, iteration.RootPath) {
+		s.writeError(w, http.StatusConflict, "The deployment prototype path is unavailable", nil)
+		return
+	}
+	item.Status = "starting"
+	item.Error = ""
+	item.Progress = append(item.Progress, "Telemetry token received securely; it will not be stored in the session database")
+	if err := s.store.UpdateDeployment(r.Context(), item); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not start local deployment", err)
+		return
+	}
+	go s.runLocalDeployment(item, iteration.RootPath, input.Token)
+	input.Token = ""
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+func (s *Server) runLocalDeployment(item domain.Deployment, root, token string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	appendProgress := func(message string) {
+		if strings.TrimSpace(message) == "" || (len(item.Progress) > 0 && item.Progress[len(item.Progress)-1] == message) {
+			return
+		}
+		item.Progress = append(item.Progress, message)
+		persistCtx, cancelPersist := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelPersist()
+		_ = s.store.UpdateDeployment(persistCtx, item)
+	}
+	err := s.deployment.StartLocal(ctx, root, item.OTLPEndpoint, item.InstanceID, token, item.ID, appendProgress)
+	token = ""
+	if err != nil {
+		item.Status = "failed"
+		item.Error = err.Error()
+		appendProgress("Local deployment failed: " + err.Error())
+	} else {
+		item.Status = "running"
+		appendProgress("Local services are running; telemetry verification is the next step")
+		_ = s.store.SetSessionState(context.Background(), item.SessionID, "Running")
+	}
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPersist()
+	if err := s.store.UpdateDeployment(persistCtx, item); err != nil {
+		s.log.Error("finish local deployment", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
+	}
+}
+
+func actionableGCXError(err error) string {
+	message := err.Error()
+	if strings.Contains(strings.ToLower(message), "expired") || strings.Contains(message, "gcx cloud login") {
+		return "gcx Cloud login has expired. Run `gcx cloud login`, then retry deployment."
+	}
+	return message
+}
+
+func pathWithin(root, candidate string) bool {
+	rootPath, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	candidatePath, err := filepath.Abs(candidate)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(rootPath, candidatePath)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +354,7 @@ func (s *Server) runPrototype(session domain.Session, iteration domain.Prototype
 		iteration.Status = "complete"
 		appendProgress("Prototype generated and validated")
 		_ = s.store.FinishOperation(persistCtx, operation.ID, "complete", "Prototype generated and validated", "")
+		_ = s.store.SetSessionState(persistCtx, session.ID, "Generated")
 	}
 	if err := s.store.FinishPrototypeIteration(persistCtx, iteration); err != nil {
 		s.log.Error("save prototype iteration", "sessionId", session.ID, "iterationId", iteration.ID, "error", err)

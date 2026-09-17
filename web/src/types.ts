@@ -19,6 +19,26 @@ export interface Session {
   messages?: Message[];
   brief?: LivingBrief;
   prototypes?: PrototypeIteration[];
+  deployments?: Deployment[];
+}
+
+export interface Deployment {
+  id: string;
+  sessionId: string;
+  prototypeIterationId: string;
+  target: "local";
+  organization: string;
+  region: string;
+  stackName: string;
+  stackSlug: string;
+  stackUrl?: string;
+  otlpEndpoint?: string;
+  instanceId?: string;
+  status: "provisioning" | "needs_token" | "starting" | "running" | "verifying" | "verified" | "failed" | "interrupted";
+  progress: string[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PrototypeIteration {

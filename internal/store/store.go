@@ -137,10 +137,33 @@ CREATE TABLE IF NOT EXISTS prototype_iterations (
 CREATE INDEX IF NOT EXISTS prototype_iterations_session_number_idx
   ON prototype_iterations(session_id, iteration_number DESC);
 
+CREATE TABLE IF NOT EXISTS deployments (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  prototype_iteration_id TEXT NOT NULL REFERENCES prototype_iterations(id) ON DELETE CASCADE,
+  target TEXT NOT NULL CHECK (target = 'local'),
+  organization TEXT NOT NULL,
+  region TEXT NOT NULL,
+  stack_name TEXT NOT NULL,
+  stack_slug TEXT NOT NULL,
+  stack_url TEXT NOT NULL DEFAULT '',
+  otlp_endpoint TEXT NOT NULL DEFAULT '',
+  instance_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('provisioning', 'needs_token', 'starting', 'running', 'verifying', 'verified', 'failed', 'interrupted')),
+  progress TEXT NOT NULL DEFAULT '[]',
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS deployments_session_created_idx
+  ON deployments(session_id, created_at DESC);
+
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (5);
+INSERT OR IGNORE INTO schema_migrations(version) VALUES (7);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
@@ -174,7 +197,11 @@ UPDATE messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE brief_thread_messages SET status = 'interrupted' WHERE status = 'streaming';
 UPDATE operations SET status = 'interrupted', ended_at = ? WHERE status = 'running';
 UPDATE prototype_iterations SET status = 'failed', error = 'Prototype generation was interrupted', updated_at = ? WHERE status = 'generating';
-`, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()))
+UPDATE deployments SET status = 'interrupted', error = 'Local deployment was interrupted by a server restart', updated_at = ? WHERE status IN ('provisioning', 'starting', 'verifying');
+UPDATE sessions SET state = 'Generated' WHERE state IN ('Draft', 'Ready') AND EXISTS (
+  SELECT 1 FROM prototype_iterations WHERE prototype_iterations.session_id = sessions.id AND prototype_iterations.status = 'complete'
+);
+`, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), formatTime(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("recover interrupted work: %w", err)
 	}
@@ -241,7 +268,94 @@ func (s *Store) GetSession(ctx context.Context, id string) (domain.Session, erro
 		return domain.Session{}, err
 	}
 	session.Prototypes = prototypes
+	deployments, err := s.ListDeployments(ctx, id)
+	if err != nil {
+		return domain.Session{}, err
+	}
+	session.Deployments = deployments
 	return session, nil
+}
+
+func (s *Store) CreateDeployment(ctx context.Context, deployment domain.Deployment) (domain.Deployment, error) {
+	now := time.Now().UTC()
+	if deployment.ID == "" {
+		deployment.ID = newID()
+	}
+	deployment.CreatedAt, deployment.UpdatedAt = now, now
+	if deployment.Progress == nil {
+		deployment.Progress = []string{}
+	}
+	progress, err := json.Marshal(deployment.Progress)
+	if err != nil {
+		return domain.Deployment{}, fmt.Errorf("encode deployment progress: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO deployments(id, session_id, prototype_iteration_id, target, organization, region, stack_name, stack_slug, status, progress, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, deployment.ID, deployment.SessionID, deployment.PrototypeIterationID, deployment.Target, deployment.Organization, deployment.Region, deployment.StackName, deployment.StackSlug, deployment.Status, string(progress), formatTime(now), formatTime(now))
+	if err != nil {
+		return domain.Deployment{}, fmt.Errorf("create deployment: %w", err)
+	}
+	return deployment, nil
+}
+
+func (s *Store) UpdateDeployment(ctx context.Context, deployment domain.Deployment) error {
+	if deployment.Progress == nil {
+		deployment.Progress = []string{}
+	}
+	progress, err := json.Marshal(deployment.Progress)
+	if err != nil {
+		return fmt.Errorf("encode deployment progress: %w", err)
+	}
+	deployment.UpdatedAt = time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE deployments SET stack_url = ?, otlp_endpoint = ?, instance_id = ?, status = ?, progress = ?, error = ?, updated_at = ?
+WHERE id = ? AND session_id = ?`, deployment.StackURL, deployment.OTLPEndpoint, deployment.InstanceID, deployment.Status, string(progress), deployment.Error, formatTime(deployment.UpdatedAt), deployment.ID, deployment.SessionID)
+	if err != nil {
+		return fmt.Errorf("update deployment: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetDeployment(ctx context.Context, sessionID, deploymentID string) (domain.Deployment, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, session_id, prototype_iteration_id, target, organization, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
+FROM deployments WHERE id = ? AND session_id = ?`, deploymentID, sessionID)
+	return scanDeployment(row)
+}
+
+func (s *Store) ListDeployments(ctx context.Context, sessionID string) ([]domain.Deployment, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, session_id, prototype_iteration_id, target, organization, region, stack_name, stack_slug, stack_url, otlp_endpoint, instance_id, status, progress, error, created_at, updated_at
+FROM deployments WHERE session_id = ? ORDER BY created_at DESC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list deployments: %w", err)
+	}
+	defer rows.Close()
+	result := []domain.Deployment{}
+	for rows.Next() {
+		deployment, err := scanDeployment(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, deployment)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SetSessionState(ctx context.Context, sessionID, state string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET state = ?, updated_at = ? WHERE id = ?`, state, formatTime(time.Now().UTC()), sessionID)
+	if err != nil {
+		return fmt.Errorf("set session state: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) CreatePrototypeIteration(ctx context.Context, sessionID string, briefVersion int) (domain.PrototypeIteration, error) {
@@ -712,6 +826,39 @@ func scanSession(row scanner) (domain.Session, error) {
 		return domain.Session{}, err
 	}
 	return session, nil
+}
+
+func scanDeployment(row scanner) (domain.Deployment, error) {
+	var deployment domain.Deployment
+	var progress, created, updated string
+	if err := row.Scan(
+		&deployment.ID, &deployment.SessionID, &deployment.PrototypeIterationID,
+		&deployment.Target, &deployment.Organization, &deployment.Region,
+		&deployment.StackName, &deployment.StackSlug, &deployment.StackURL,
+		&deployment.OTLPEndpoint, &deployment.InstanceID, &deployment.Status, &progress, &deployment.Error,
+		&created, &updated,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Deployment{}, ErrNotFound
+		}
+		return domain.Deployment{}, fmt.Errorf("scan deployment: %w", err)
+	}
+	if err := json.Unmarshal([]byte(progress), &deployment.Progress); err != nil {
+		return domain.Deployment{}, fmt.Errorf("decode deployment progress: %w", err)
+	}
+	if deployment.Progress == nil {
+		deployment.Progress = []string{}
+	}
+	var err error
+	deployment.CreatedAt, err = parseTime(created)
+	if err != nil {
+		return domain.Deployment{}, err
+	}
+	deployment.UpdatedAt, err = parseTime(updated)
+	if err != nil {
+		return domain.Deployment{}, err
+	}
+	return deployment, nil
 }
 
 func scanBriefThread(row scanner) (domain.BriefThread, error) {

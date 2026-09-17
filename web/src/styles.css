@@ -14,7 +14,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; }
-button, textarea { font: inherit; }
+button, textarea, input { font: inherit; }
 button { color: inherit; }
 
 .app { min-height: 100vh; background: radial-gradient(circle at 70% 0, rgba(83, 45, 132, .13), transparent 32%), #09090c; }
@@ -186,6 +186,29 @@ button { color: inherit; }
 .prototype-card small, .alignment-card small { display: block; margin-top: 6px; color: #817d89; font-size: 9px; line-height: 1.4; }
 .prototype-card > button { width: 100%; margin-top: 9px; border: 1px solid rgba(67,209,143,.5); border-radius: 7px; padding: 7px 9px; background: rgba(67,209,143,.1); color: #a9e8c9; font-size: 10px; font-weight: 650; cursor: pointer; }
 .prototype-card > button:disabled { opacity: .6; cursor: default; }
+.deployment-card { margin-top: 9px; border: 1px solid rgba(150,104,255,.38); border-radius: 9px; padding: 11px; background: linear-gradient(145deg, rgba(150,104,255,.08), rgba(23,23,30,.95)); }
+.deployment-card > span { color: #b899ef; font-size: 8px; font-weight: 700; letter-spacing: .1em; }
+.deployment-card > p, .deployment-form p { margin: 6px 0; color: #aaa6b4; font-size: 9px; line-height: 1.5; }
+.deployment-status { margin-top: 7px; }
+.deployment-status > strong { display: block; color: #ded9e5; font-size: 11px; text-transform: capitalize; }
+.deployment-status > small { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: #918c9b; font-size: 9px; line-height: 1.4; }
+.deployment-stack-link, .deployment-form > a { display: inline-block; margin-top: 7px; color: #b99cff; font-size: 9px; text-underline-offset: 2px; }
+.deployment-error { border: 1px solid rgba(251,98,98,.3); border-radius: 7px; padding: 7px 8px; background: rgba(96,31,40,.2); color: #f0aeb3 !important; overflow-wrap: anywhere; }
+.deployment-form { display: grid; gap: 8px; margin-top: 10px; border-top: 1px solid #35313e; padding-top: 10px; }
+.deployment-form label { display: grid; gap: 4px; color: #aaa6b4; font-size: 8px; font-weight: 650; }
+.deployment-form input { width: 100%; border: 1px solid #3a3744; border-radius: 7px; padding: 7px 8px; outline: 0; background: #121218; color: #f0edf4; font-size: 10px; }
+.deployment-form input:focus { border-color: #68577e; box-shadow: 0 0 0 2px rgba(150,104,255,.08); }
+.deployment-form button { border: 1px solid rgba(67,209,143,.48); border-radius: 7px; padding: 7px 9px; background: rgba(67,209,143,.1); color: #a9e8c9; font-size: 9px; font-weight: 700; cursor: pointer; }
+.deployment-form button:disabled { opacity: .4; cursor: default; }
+.deployment-form > small, .deployment-running small { color: #817d89; font-size: 8px; line-height: 1.4; }
+.deployment-confirm { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid #2f2d37; border-radius: 7px; padding: 6px 7px; background: #15151b; }
+.deployment-confirm small { color: #777481; font-size: 8px; }
+.deployment-confirm strong, .deployment-confirm code { min-width: 0; color: #c9c4d1; font-size: 8px; overflow-wrap: anywhere; text-align: right; }
+.token-form code { color: #ffc7b2; }
+.deployment-running { margin-top: 9px; border: 1px solid rgba(67,209,143,.28); border-radius: 7px; padding: 8px; background: rgba(67,209,143,.06); }
+.deployment-running strong, .deployment-running small { display: block; }
+.deployment-running strong { color: #a9e8c9; font-size: 9px; }
+.deployment-running small { margin-top: 4px; }
 .prototype-progress { display: flex !important; align-items: center; gap: 7px; color: #b5adc0 !important; }
 .prototype-progress .activity-pulse { flex: 0 0 auto; }
 .prototype-result { margin-top: 10px; border-top: 1px solid #2f3433; padding-top: 9px; }
