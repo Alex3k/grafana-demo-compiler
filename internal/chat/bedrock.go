@@ -319,6 +319,14 @@ func (s *Service) compilerFor(systemPrompt string, toolReserve int) contextengin
 	return contextengine.NewWithConfig(s.configForPrompt(systemPrompt, toolReserve))
 }
 
+func (s *Service) conversationCompiler(systemPrompt string, focused bool) contextengine.Compiler {
+	config := s.configForPrompt(systemPrompt, 4000)
+	if !focused {
+		config.MaxInputTokens = positiveEnvInt("DEMO_COMPILER_COLLABORATOR_MAX_INPUT_TOKENS", 128_000)
+	}
+	return contextengine.NewWithConfig(config)
+}
+
 func (s *Service) Configured() bool {
 	return s != nil && s.model != nil && s.region != "" && s.modelID != ""
 }
@@ -354,7 +362,7 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 		}
 		toolContext += revisionContext
 	}
-	compiler := s.compilerFor(appPrompts.Collaborator()+toolContext, 4000)
+	compiler := s.conversationCompiler(appPrompts.Collaborator()+toolContext, focus != nil)
 	var systemContext string
 	var selectedMessages []domain.Message
 	var manifest contextengine.Manifest

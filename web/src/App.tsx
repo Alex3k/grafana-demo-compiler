@@ -627,7 +627,7 @@ function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBu
       {session && session.prototypes?.some((prototype) => prototype.status === "complete") && <DeploymentCard key={`deployment:${session.id}`} session={session} deployment={session.deployments?.[0]} onDeploy={onDeployLocal} onSubmitToken={onSubmitTelemetryToken} />}
       <ContextUsageCard key={`context-usage:${session?.id ?? "no-session"}`} sessionId={session?.id} />
       {session && <GrafanaActions key={`grafana-actions:${session.id}`} sessionId={session.id} />}
-      {session && <PrototypeRevisions key={`revisions:${session.id}`} sessionId={session.id} onStarted={onRevisionStarted} />}
+      {session && <PrototypeRevisions key={`revisions:${session.id}`} sessionId={session.id} iterations={session.prototypes ?? []} onStarted={onRevisionStarted} />}
       <p className="eyebrow rail-section">LIVING BRIEF</p>
       {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>

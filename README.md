@@ -257,10 +257,15 @@ The context budget can be tuned without code changes:
 
 ```bash
 DEMO_COMPILER_CONTEXT_MAX_INPUT_TOKENS=32000
+DEMO_COMPILER_COLLABORATOR_MAX_INPUT_TOKENS=128000
 DEMO_COMPILER_CONTEXT_SAFETY_TOKENS=1500
 DEMO_COMPILER_CONTEXT_PROVIDER_OVERHEAD_TOKENS=1000
 DEMO_COMPILER_CONTEXT_BYTES_PER_TOKEN=3
 ```
+
+The collaborator (main chat) defaults to a 128,000-token input budget; its
+role-specific setting does not change focused-topic or curator budgets. It does
+not increase the recent-message selection window or enable summarisation.
 
 The byte estimator intentionally errs on the conservative side. These settings
 reserve room for system prompts, provider formatting, tool schemas, and model

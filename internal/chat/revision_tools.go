@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path"
 	"strings"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
@@ -21,6 +22,33 @@ type revisionRequest struct {
 	Goal            string   `json:"goal"`
 	Evidence        string   `json:"evidence"`
 	Files           []string `json:"files" jsonschema:"description=Exact relative file paths the human approves for editing or adding. No requirement changes."`
+}
+
+// Only route recognizable resource manifests. Application code and ambiguous
+// configuration paths must remain eligible for source revisions.
+func grafanaResourceOnly(files []string) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		file = path.Clean(file)
+		switch path.Ext(file) {
+		case ".json", ".yaml", ".yml":
+		default:
+			return false
+		}
+		resource := false
+		for _, dir := range []string{"dashboards/", "alerts/", "slos/", "grafana/dashboards/", "grafana/alerts/", "grafana/slos/"} {
+			if strings.HasPrefix(file, dir) {
+				resource = true
+				break
+			}
+		}
+		if !resource {
+			return false
+		}
+	}
+	return true
 }
 
 func sourceIteration(session domain.Session, id string) (domain.PrototypeIteration, error) {
@@ -52,7 +80,7 @@ func (s *Service) revisionTools(ctx context.Context, session domain.Session, set
 		return "", err
 	}
 	set["read_prototype_file"] = read
-	propose, err := aisdk.TypedTool(aisdk.TypedToolDef[revisionRequest, domain.RevisionProposal]{Name: "propose_prototype_revision", Description: "Propose a targeted code revision for human button approval. Does not build, deploy, or change the brief. Only propose changes consistent with confirmed requirements; confirm requirement changes separately first. Include gcx findings in evidence and exact files to change.", Execute: func(ctx context.Context, in revisionRequest, _ aisdk.ToolExecutionOptions) (domain.RevisionProposal, error) {
+	propose, err := aisdk.TypedTool(aisdk.TypedToolDef[revisionRequest, any]{Name: "propose_prototype_revision", Description: "Propose a targeted application code revision for human button approval. Dashboard, alert, and SLO-only changes use run_gcx with an inline manifest and Grafana actions approval, without a prototype build or redeploy. For mixed requests, propose application code separately from Grafana actions. Does not build, deploy, or change the brief. Only propose changes consistent with confirmed requirements; confirm requirement changes separately first. Include gcx findings in evidence and exact files to change.", Execute: func(ctx context.Context, in revisionRequest, _ aisdk.ToolExecutionOptions) (any, error) {
 		var empty domain.RevisionProposal
 		current, err := s.gcxStore.GetSession(ctx, session.ID)
 		if err != nil {
@@ -65,6 +93,13 @@ func (s *Service) revisionTools(ctx context.Context, session domain.Session, set
 			if err := prototype.ValidateRevisionPath(path); err != nil {
 				return empty, err
 			}
+		}
+		if grafanaResourceOnly(in.Files) {
+			return map[string]string{
+				"status":  "redirected",
+				"tool":    "run_gcx",
+				"message": "These files contain only Grafana resource manifests. Discover command syntax and read live resources with run_gcx, then submit the resource change using @manifest and the inline manifest field for approval in Grafana actions. No prototype revision, build, or redeployment is needed. No revision was created.",
+			}, nil
 		}
 		base, err := sourceIteration(current, in.BaseIterationID)
 		if err != nil {
