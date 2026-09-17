@@ -21,13 +21,15 @@ import (
 )
 
 const (
-	roleCollaborator      = "demo-collaborator"
-	roleCurator           = "living-brief-curator"
-	roleEvaluator         = "requirement-evaluator"
-	roleBuilder           = "prototype-builder"
-	briefUpdateTool       = "propose_brief_update"
-	writeDemoFileTool     = "write_demo_file"
-	validatePrototypeTool = "validate_prototype"
+	roleCollaborator        = "demo-collaborator"
+	roleCurator             = "living-brief-curator"
+	roleEvaluator           = "requirement-evaluator"
+	rolePrototypePlanner    = "prototype-planner"
+	roleBuilder             = "prototype-builder"
+	briefUpdateTool         = "propose_brief_update"
+	recordPrototypePlanTool = "record_prototype_plan"
+	writeDemoFileTool       = "write_demo_file"
+	validatePrototypeTool   = "validate_prototype"
 )
 
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
@@ -58,6 +60,44 @@ type PrototypeResult struct {
 	Artifacts    []domain.PrototypeArtifact
 	Checks       []domain.PrototypeCheck
 	GenerationID string
+}
+
+type prototypeBuildPlan struct {
+	Summary              string                   `json:"summary"`
+	Decisions            []prototypeDecision      `json:"decisions"`
+	AlternativesRejected []prototypeAlternative   `json:"alternativesRejected"`
+	Files                []prototypeFilePlan      `json:"files"`
+	TelemetryMapping     []prototypeTelemetryPlan `json:"telemetryMapping"`
+	Assumptions          []string                 `json:"assumptions"`
+	Risks                []string                 `json:"risks"`
+	Validation           []string                 `json:"validation"`
+}
+
+type prototypeDecision struct {
+	Decision  string `json:"decision"`
+	Rationale string `json:"rationale"`
+	Evidence  string `json:"evidence"`
+}
+
+type prototypeAlternative struct {
+	Alternative string `json:"alternative"`
+	Reason      string `json:"reason"`
+}
+
+type prototypeFilePlan struct {
+	Path    string `json:"path"`
+	Purpose string `json:"purpose"`
+}
+
+type prototypeTelemetryPlan struct {
+	Signal    string `json:"signal"`
+	Source    string `json:"source"`
+	StoryBeat string `json:"storyBeat"`
+}
+
+type prototypePlanReceipt struct {
+	Status    string `json:"status"`
+	FileCount int    `json:"fileCount"`
 }
 
 type writeDemoFileInput struct {
@@ -336,6 +376,16 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	if session.Brief == nil || !session.Brief.Content.PrototypeOffer.Ready {
 		return PrototypeResult{}, errors.New("the living brief is not ready to prototype")
 	}
+	if onProgress != nil {
+		onProgress("Creating an auditable implementation decision record")
+	}
+	plan, planGenerationID, err := s.planPrototype(ctx, session)
+	if err != nil {
+		return PrototypeResult{}, err
+	}
+	if onProgress != nil {
+		onProgress("Build plan ready: " + plan.Summary)
+	}
 	workspace, err := prototype.New(root)
 	if err != nil {
 		return PrototypeResult{}, err
@@ -379,11 +429,12 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	payload, err := json.Marshal(struct {
 		Title string             `json:"title"`
 		Brief domain.LivingBrief `json:"livingBrief"`
-	}{Title: session.Title, Brief: *session.Brief})
+		Plan  prototypeBuildPlan `json:"implementationPlan"`
+	}{Title: session.Title, Brief: *session.Brief, Plan: plan})
 	if err != nil {
 		return PrototypeResult{}, fmt.Errorf("encode prototype context: %w", err)
 	}
-	ctx, generationID := roleContext(ctx, session, roleBuilder)
+	ctx, generationID := roleContext(ctx, session, roleBuilder, planGenerationID)
 	if onProgress != nil {
 		onProgress("Reviewing the approved brief and planning the smallest viable demo")
 	}
@@ -412,6 +463,50 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		Checks:       checks,
 		GenerationID: generationID,
 	}, nil
+}
+
+func (s *Service) planPrototype(ctx context.Context, session domain.Session) (prototypeBuildPlan, string, error) {
+	payload, err := json.Marshal(struct {
+		Title string             `json:"title"`
+		Brief domain.LivingBrief `json:"livingBrief"`
+	}{Title: session.Title, Brief: *session.Brief})
+	if err != nil {
+		return prototypeBuildPlan{}, "", fmt.Errorf("encode prototype planning context: %w", err)
+	}
+	var plan prototypeBuildPlan
+	tool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypeBuildPlan, prototypePlanReceipt]{
+		Name:        recordPrototypePlanTool,
+		Title:       "Record prototype implementation plan",
+		Description: "Record the complete, auditable implementation decision record before prototype files are written.",
+		Execute: func(_ context.Context, input prototypeBuildPlan, _ aisdk.ToolExecutionOptions) (prototypePlanReceipt, error) {
+			plan = input
+			return prototypePlanReceipt{Status: "recorded", FileCount: len(input.Files)}, nil
+		},
+	})
+	if err != nil {
+		return prototypeBuildPlan{}, "", fmt.Errorf("create prototype planning tool: %w", err)
+	}
+	ctx, generationID := roleContext(ctx, session, rolePrototypePlanner)
+	stream := aisdk.StreamText(ctx, s.model,
+		aisdk.WithSystem(appPrompts.PrototypePlanner()),
+		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithTools(aisdk.ToolSet{recordPrototypePlanTool: tool}),
+		aisdk.WithStopWhen(aisdk.StepCountIs(1)),
+		aisdk.WithMaxOutputTokens(6000),
+		aisdk.WithMaxRetries(1),
+	)
+	for part := range stream.FullStream() {
+		if streamError, ok := part.(aisdk.StreamError); ok && streamError.Error != nil {
+			return prototypeBuildPlan{}, generationID, fmt.Errorf("plan prototype: %w", streamError.Error)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return prototypeBuildPlan{}, generationID, fmt.Errorf("plan prototype: %w", err)
+	}
+	if strings.TrimSpace(plan.Summary) == "" || len(plan.Files) == 0 {
+		return prototypeBuildPlan{}, generationID, fmt.Errorf("prototype planner did not call %s with a complete plan", recordPrototypePlanTool)
+	}
+	return plan, generationID, nil
 }
 
 func stripJSONFence(value string) string {

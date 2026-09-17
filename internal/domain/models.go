@@ -34,6 +34,7 @@ type PrototypeIteration struct {
 	Summary      string              `json:"summary"`
 	Artifacts    []PrototypeArtifact `json:"artifacts"`
 	Checks       []PrototypeCheck    `json:"checks"`
+	Progress     []string            `json:"progress"`
 	Error        string              `json:"error,omitempty"`
 	CreatedAt    time.Time           `json:"createdAt"`
 	UpdatedAt    time.Time           `json:"updatedAt"`

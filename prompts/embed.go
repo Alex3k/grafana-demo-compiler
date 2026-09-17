@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const Version = "v2.2"
+const Version = "v2.3"
 
 //go:embed v2/shared-constitution.md
 var sharedConstitution string
@@ -22,6 +22,9 @@ var requirementEvaluator string
 //go:embed v2/prototype-builder.md
 var prototypeBuilder string
 
+//go:embed v2/prototype-planner.md
+var prototypePlanner string
+
 func Collaborator() string {
 	return combine(sharedConstitution, demoCollaborator)
 }
@@ -36,6 +39,10 @@ func Evaluator() string {
 
 func Builder() string {
 	return combine(sharedConstitution, prototypeBuilder)
+}
+
+func PrototypePlanner() string {
+	return combine(sharedConstitution, prototypePlanner)
 }
 
 func combine(parts ...string) string {

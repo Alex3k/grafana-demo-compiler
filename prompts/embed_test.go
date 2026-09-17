@@ -11,6 +11,7 @@ func TestRolePromptsIncludeSharedConstitution(t *testing.T) {
 		"curator":      Curator(),
 		"evaluator":    Evaluator(),
 		"builder":      Builder(),
+		"planner":      PrototypePlanner(),
 	} {
 		if !strings.Contains(prompt, "Non-negotiable MVP invariants") {
 			t.Fatalf("%s prompt does not include the shared constitution", name)

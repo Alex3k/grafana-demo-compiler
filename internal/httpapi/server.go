@@ -51,11 +51,6 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 }
 
 func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.writeError(w, http.StatusInternalServerError, "Streaming is unavailable", nil)
-		return
-	}
 	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		s.writeError(w, http.StatusNotFound, "Session not found", err)
@@ -69,6 +64,10 @@ func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusConflict, "The living brief does not yet contain a prototype offer", nil)
 		return
 	}
+	if len(session.Prototypes) > 0 && session.Prototypes[0].Status == "generating" {
+		s.writeError(w, http.StatusConflict, "A prototype iteration is already running", nil)
+		return
+	}
 	iteration, err := s.store.CreatePrototypeIteration(r.Context(), session.ID, session.Brief.Version)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Could not create prototype iteration", err)
@@ -79,6 +78,14 @@ func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
 		shortID = shortID[:8]
 	}
 	iteration.RootPath = filepath.Join(s.prototypeRoot, session.ID, "iterations", fmt.Sprintf("%03d-%s", iteration.Number, shortID))
+	iteration.Progress = append(iteration.Progress, "Queued for the background builder")
+	if err := s.store.UpdatePrototypeProgress(r.Context(), iteration); err != nil {
+		iteration.Status = "failed"
+		iteration.Error = err.Error()
+		_ = s.store.FinishPrototypeIteration(r.Context(), iteration)
+		s.writeError(w, http.StatusInternalServerError, "Could not prepare prototype generation", err)
+		return
+	}
 	operation, err := s.store.CreateOperation(r.Context(), domain.Operation{
 		SessionID: session.ID,
 		Kind:      "prototype_generation",
@@ -92,61 +99,32 @@ func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "Could not start prototype generation", err)
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	_ = writeEvent(w, flusher, "prototype_started", iteration)
-	activity, _ := s.store.CreateMessage(r.Context(), domain.Message{
+	_, _ = s.store.CreateMessage(r.Context(), domain.Message{
 		SessionID: session.ID, Role: "system", Kind: "activity",
 		Content: fmt.Sprintf("Building local prototype iteration %d", iteration.Number), Status: "complete",
 	})
-	_ = writeEvent(w, flusher, "activity", activity)
+	go s.runPrototype(session, iteration, operation)
+	writeJSON(w, http.StatusAccepted, iteration)
+}
 
-	buildCtx, cancelBuild := context.WithTimeout(r.Context(), 7*time.Minute)
+func (s *Server) runPrototype(session domain.Session, iteration domain.PrototypeIteration, operation domain.Operation) {
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancelBuild()
-	type buildOutcome struct {
-		result chat.PrototypeResult
-		err    error
-	}
-	progress := make(chan string, 100)
-	completed := make(chan buildOutcome, 1)
-	go func() {
-		result, err := s.chat.BuildPrototype(buildCtx, session, iteration.RootPath, func(message string) {
-			select {
-			case progress <- message:
-			default:
-			}
-		})
-		completed <- buildOutcome{result: result, err: err}
-	}()
-	heartbeat := time.NewTicker(10 * time.Second)
-	defer heartbeat.Stop()
-	var result chat.PrototypeResult
-	var buildErr error
-buildLoop:
-	for {
-		select {
-		case message := <-progress:
-			if err := writeEvent(w, flusher, "prototype_progress", map[string]string{"message": message}); err != nil {
-				cancelBuild()
-				buildErr = err
-				break buildLoop
-			}
-		case outcome := <-completed:
-			result, buildErr = outcome.result, outcome.err
-			break buildLoop
-		case <-heartbeat.C:
-			if err := writeEvent(w, flusher, "prototype_progress", map[string]string{"message": "The builder is preparing the next artifact"}); err != nil {
-				cancelBuild()
-				buildErr = err
-				break buildLoop
-			}
-		case <-buildCtx.Done():
-			buildErr = buildCtx.Err()
-			break buildLoop
+	appendProgress := func(message string) {
+		if strings.TrimSpace(message) == "" || iteration.Progress[len(iteration.Progress)-1] == message {
+			return
+		}
+		iteration.Progress = append(iteration.Progress, message)
+		if len(iteration.Progress) > 100 {
+			iteration.Progress = iteration.Progress[len(iteration.Progress)-100:]
+		}
+		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.store.UpdatePrototypeProgress(persistCtx, iteration); err != nil {
+			s.log.Error("save prototype progress", "sessionId", session.ID, "iterationId", iteration.ID, "error", err)
 		}
 	}
+	result, buildErr := s.chat.BuildPrototype(buildCtx, session, iteration.RootPath, appendProgress)
 	iteration.Summary = result.Summary
 	iteration.Artifacts = result.Artifacts
 	iteration.Checks = result.Checks
@@ -155,13 +133,17 @@ buildLoop:
 	if buildErr != nil {
 		iteration.Status = "failed"
 		iteration.Error = buildErr.Error()
+		appendProgress("Build failed: " + buildErr.Error())
+		s.log.Error("prototype generation failed", "sessionId", session.ID, "iterationId", iteration.ID, "error", buildErr)
 		_ = s.store.FinishOperation(persistCtx, operation.ID, "failed", "Prototype generation failed", buildErr.Error())
 	} else if failedPrototypeChecks(result.Checks) {
 		iteration.Status = "failed"
 		iteration.Error = "Prototype validation failed"
+		appendProgress("Prototype validation failed")
 		_ = s.store.FinishOperation(persistCtx, operation.ID, "failed", "Prototype validation failed", iteration.Error)
 	} else {
 		iteration.Status = "complete"
+		appendProgress("Prototype generated and validated")
 		_ = s.store.FinishOperation(persistCtx, operation.ID, "complete", "Prototype generated and validated", "")
 	}
 	if err := s.store.FinishPrototypeIteration(persistCtx, iteration); err != nil {
@@ -170,9 +152,7 @@ buildLoop:
 		iteration.Error = "Could not save prototype result"
 	}
 	completion := fmt.Sprintf("Prototype iteration %d %s", iteration.Number, iteration.Status)
-	activity, _ = s.store.CreateMessage(persistCtx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: completion, Status: "complete"})
-	_ = writeEvent(w, flusher, "activity", activity)
-	_ = writeEvent(w, flusher, "prototype_completed", iteration)
+	_, _ = s.store.CreateMessage(persistCtx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: completion, Status: "complete"})
 }
 
 func failedPrototypeChecks(checks []domain.PrototypeCheck) bool {

@@ -1,4 +1,4 @@
-import type { BriefFocus, BriefThread, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
+import type { BriefFocus, BriefThread, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -34,6 +34,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  createPrototype: (sessionId: string) =>
+    json<PrototypeIteration>(`/api/sessions/${sessionId}/prototypes`, { method: "POST" }),
 };
 
 export async function streamMessage(
@@ -51,14 +53,6 @@ export async function streamBriefThreadMessage(
   onEvent: (event: StreamEvent) => void,
 ): Promise<void> {
   return stream(`/api/sessions/${sessionId}/brief-threads/${threadId}/messages`, content, onEvent);
-}
-
-export async function streamPrototype(
-  sessionId: string,
-  onEvent: (event: StreamEvent) => void,
-): Promise<void> {
-  const response = await fetch(`/api/sessions/${sessionId}/prototypes`, { method: "POST" });
-  return readStream(response, onEvent, new Set(["prototype_completed", "error"]));
 }
 
 async function stream(path: string, content: string, onEvent: (event: StreamEvent) => void): Promise<void> {

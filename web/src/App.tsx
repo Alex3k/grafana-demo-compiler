@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useId, useRef, useState } from "react";
 import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, streamBriefThreadMessage, streamMessage, streamPrototype } from "./api";
+import { api, streamBriefThreadMessage, streamMessage } from "./api";
 import type { BriefFocus, BriefItem, BriefThread, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
@@ -33,12 +33,13 @@ function App() {
   const [topicSending, setTopicSending] = useState(false);
   const [topicConfirming, setTopicConfirming] = useState(false);
   const [topicError, setTopicError] = useState("");
-  const [prototypeBusy, setPrototypeBusy] = useState(false);
-  const [prototypeActivity, setPrototypeActivity] = useState<string[]>([]);
   const [showBuildDetails, setShowBuildDetails] = useState(() => localStorage.getItem("showBuildDetails") !== "false");
   const conversationRef = useRef<HTMLElement>(null);
   const stickToBottomRef = useRef(true);
   const sendingRef = useRef(false);
+  const activePrototype = active?.prototypes?.[0];
+  const prototypeBusy = activePrototype?.status === "generating";
+  const prototypeActivity = activePrototype?.progress ?? [];
 
   useEffect(() => {
     void Promise.all([api.sessions(), api.health()])
@@ -63,6 +64,33 @@ function App() {
     setMessageQueues((current) => ({ ...current, [active.id]: (current[active.id] ?? []).filter((message) => message.id !== next.id) }));
     void sendNow(active.id, next.content);
   }, [active?.id, messageQueues, sending]);
+
+  useEffect(() => {
+    if (!active || activePrototype?.status !== "generating") return;
+    const sessionId = active.id;
+    const iterationId = activePrototype.id;
+    let stopped = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await api.session(sessionId);
+        if (stopped) return;
+        setActive((current) => current?.id === sessionId ? next : current);
+        if (next.prototypes?.[0]?.id === iterationId && next.prototypes[0].status === "generating") {
+          timer = window.setTimeout(poll, 1200);
+        } else {
+          await refreshSessions();
+        }
+      } catch (reason) {
+        if (!stopped) {
+          setError(reason instanceof Error ? reason.message : "Could not refresh prototype progress.");
+          timer = window.setTimeout(poll, 2500);
+        }
+      }
+    };
+    timer = window.setTimeout(poll, 500);
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [active?.id, activePrototype?.id, activePrototype?.status]);
 
   async function refreshSessions() {
     const items = await api.sessions();
@@ -159,36 +187,17 @@ function App() {
   }
 
   async function buildPrototype() {
-    if (!active || sendingRef.current || prototypeBusy) return;
+    if (!active || prototypeBusy) return;
     const sessionId = active.id;
-    sendingRef.current = true;
-    setSending(true);
-    setPrototypeBusy(true);
-    setPrototypeActivity(["Starting a new local prototype iteration"]);
     setError("");
     try {
-      await streamPrototype(sessionId, (streamEvent) => {
-        if (streamEvent.event === "prototype_progress") {
-          const message = (streamEvent.data as { message: string }).message;
-          setPrototypeActivity((current) => current[current.length - 1] === message ? current : [...current, message].slice(-8));
-        } else if (streamEvent.event === "activity") {
-          applyStreamEvent(sessionId, streamEvent);
-        } else if (streamEvent.event === "prototype_started" || streamEvent.event === "prototype_completed") {
-          const iteration = streamEvent.data as PrototypeIteration;
-          setActive((current) => current && current.id === sessionId
-            ? { ...current, prototypes: [iteration, ...(current.prototypes ?? []).filter((item) => item.id !== iteration.id)] }
-            : current);
-        }
-      });
-      setActive(await api.session(sessionId));
+      const iteration = await api.createPrototype(sessionId);
+      setActive((current) => current && current.id === sessionId
+        ? { ...current, prototypes: [iteration, ...(current.prototypes ?? []).filter((item) => item.id !== iteration.id)] }
+        : current);
       await refreshSessions();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The prototype could not be generated.");
-    } finally {
-      sendingRef.current = false;
-      setSending(false);
-      setPrototypeBusy(false);
-      setPrototypeActivity([]);
     }
   }
 
@@ -504,8 +513,9 @@ function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBu
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
+      {session?.brief && <PrototypeCard offer={session.brief.content.prototypeOffer} iteration={session.prototypes?.[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />}
       <p className="eyebrow rail-section">LIVING BRIEF</p>
-      {session?.brief ? <BriefPanel brief={session.brief} prototypes={session.prototypes ?? []} prototypeBusy={prototypeBusy} prototypeProgress={prototypeProgress} onBuildPrototype={onBuildPrototype} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
+      {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
       <Connection name="SQLite" status={health.sqlite.status} detail="Persistent session store" />
       <Connection name="Amazon Bedrock" status={health.bedrock.status} detail={health.bedrock.modelId || "Model not configured"} />
@@ -519,7 +529,7 @@ function Connection({ name, status, detail }: { name: string; status: string; de
   return <div className="connection"><span className={`status-dot ${healthy ? "good" : status === "error" ? "bad" : "warn"}`} /><div><strong>{name}</strong><small>{detail}</small></div></div>;
 }
 
-function BriefPanel({ brief, prototypes, prototypeBusy, prototypeProgress, onBuildPrototype, onFocusTopic }: { brief: LivingBrief; prototypes: PrototypeIteration[]; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onFocusTopic: (focus: BriefFocus) => void }) {
+function BriefPanel({ brief, onFocusTopic }: { brief: LivingBrief; onFocusTopic: (focus: BriefFocus) => void }) {
   const content = brief.content;
   const coreItems: Array<[string, BriefItem]> = [
     ["Audience", content.audience],
@@ -545,7 +555,6 @@ function BriefPanel({ brief, prototypes, prototypeBusy, prototypeProgress, onBui
       <ArchitectureSection source={content.mermaid} />
       {!!content.openQuestions.length && <BriefSection title={`Open questions · ${content.openQuestions.length}`} open><ul className="question-list">{content.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></BriefSection>}
       {!!content.decisions.length && <BriefSection title="Decisions"><ul className="decision-list">{content.decisions.map((decision) => <li key={`${decision.summary}-${decision.evidence}`}><StatusPill status={decision.status} /> <span>{decision.summary}</span></li>)}</ul></BriefSection>}
-      <PrototypeCard offer={content.prototypeOffer} iteration={prototypes[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />
       {content.acceptance.accepted && <AlignmentCard acceptance={content.acceptance} />}
     </div>
   );

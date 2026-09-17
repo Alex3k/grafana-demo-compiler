@@ -31,6 +31,7 @@ export interface PrototypeIteration {
   summary: string;
   artifacts: Array<{ path: string; size: number }>;
   checks: Array<{ name: string; status: "passed" | "failed"; detail: string }>;
+  progress: string[];
   error?: string;
   createdAt: string;
   updatedAt: string;
