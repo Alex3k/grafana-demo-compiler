@@ -528,17 +528,85 @@ func sanitizeAssistantText(value string) string {
 
 func briefContext(session domain.Session) string {
 	payload, err := json.Marshal(struct {
-		State string              `json:"sessionState"`
-		Brief *domain.LivingBrief `json:"currentBrief,omitempty"`
-	}{State: session.State, Brief: session.Brief})
+		State       string              `json:"sessionState"`
+		Brief       *domain.LivingBrief `json:"currentBrief,omitempty"`
+		Operational operationalState    `json:"operationalState"`
+	}{State: session.State, Brief: session.Brief, Operational: currentOperationalState(session)})
 	if err != nil {
 		return ""
 	}
-	context := "\n\n<session_context>\n" + string(payload) + "\n</session_context>"
+	context := "\n\n<session_context>\n" + string(payload) + "\nThe operational state above comes from the compiler's persisted build and deployment records and is authoritative evidence of recorded operations. Use it when answering what has been generated, provisioned, or started. A running deployment means Docker Compose started successfully at the recorded time; it is not a live health check. Only describe telemetry as verified when the deployment status is verified. Do not claim you lack visibility into these recorded operations.\n</session_context>"
 	if facts := confirmedBriefFacts(session.Brief); facts != "" {
 		context += "\n\n<confirmed_brief_facts>\nThese are the current locked facts. They supersede older conversation messages that proposed alternatives or called them unresolved. Use them as stated and do not reopen them.\n" + facts + "\n</confirmed_brief_facts>"
 	}
 	return context
+}
+
+type operationalState struct {
+	Prototype  *prototypeState  `json:"latestPrototype,omitempty"`
+	Deployment *deploymentState `json:"latestDeployment,omitempty"`
+}
+
+type prototypeState struct {
+	Iteration     int    `json:"iteration"`
+	BriefVersion  int    `json:"briefVersion"`
+	Status        string `json:"status"`
+	ArtifactCount int    `json:"artifactCount"`
+	ChecksPassed  int    `json:"checksPassed"`
+	ChecksTotal   int    `json:"checksTotal"`
+}
+
+type deploymentState struct {
+	PrototypeIteration int    `json:"prototypeIteration,omitempty"`
+	Target             string `json:"target"`
+	Region             string `json:"region"`
+	StackName          string `json:"stackName"`
+	StackSlug          string `json:"stackSlug"`
+	StackURL           string `json:"stackUrl,omitempty"`
+	Status             string `json:"status"`
+	LatestProgress     string `json:"latestProgress,omitempty"`
+}
+
+func currentOperationalState(session domain.Session) operationalState {
+	state := operationalState{}
+	if len(session.Prototypes) > 0 {
+		latest := session.Prototypes[0]
+		passed := 0
+		for _, check := range latest.Checks {
+			if check.Status == "passed" {
+				passed++
+			}
+		}
+		state.Prototype = &prototypeState{
+			Iteration: latest.Number, BriefVersion: latest.BriefVersion, Status: latest.Status,
+			ArtifactCount: len(latest.Artifacts), ChecksPassed: passed, ChecksTotal: len(latest.Checks),
+		}
+	}
+	if len(session.Deployments) > 0 {
+		latest := session.Deployments[0]
+		prototypeIteration := 0
+		for _, prototype := range session.Prototypes {
+			if prototype.ID == latest.PrototypeIterationID {
+				prototypeIteration = prototype.Number
+				break
+			}
+		}
+		progress := ""
+		if latest.Status != "failed" && latest.Status != "interrupted" && len(latest.Progress) > 0 {
+			progress = latest.Progress[len(latest.Progress)-1]
+			characters := []rune(progress)
+			if len(characters) > 240 {
+				progress = string(characters[:240])
+			}
+		}
+		state.Deployment = &deploymentState{
+			PrototypeIteration: prototypeIteration,
+			Target:             latest.Target, Region: latest.Region, StackName: latest.StackName,
+			StackSlug: latest.StackSlug, StackURL: latest.StackURL, Status: latest.Status,
+			LatestProgress: progress,
+		}
+	}
+	return state
 }
 
 func confirmedBriefFacts(brief *domain.LivingBrief) string {

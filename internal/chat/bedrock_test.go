@@ -118,3 +118,42 @@ func TestBriefContextHighlightsConfirmedFactsAfterFullBrief(t *testing.T) {
 		t.Fatal("confirmed facts must follow the full session context")
 	}
 }
+
+func TestBriefContextIncludesAuthoritativeOperationalState(t *testing.T) {
+	session := domain.Session{
+		State: "Running",
+		Prototypes: []domain.PrototypeIteration{{
+			ID: "prototype-8", Number: 8, BriefVersion: 5, Status: "complete", Summary: "New iteration not deployed",
+		}, {
+			ID: "prototype-7", Number: 7, BriefVersion: 4, Status: "complete", Summary: "Four Go services",
+			RootPath:  "/private/generated/demo",
+			Artifacts: []domain.PrototypeArtifact{{Path: "docker-compose.yml"}},
+			Checks:    []domain.PrototypeCheck{{Name: "compose", Status: "passed"}, {Name: "security", Status: "failed"}},
+		}},
+		Deployments: []domain.Deployment{{
+			PrototypeIterationID: "prototype-7",
+			Target:               "local", Region: "prod-us-east-0", StackName: "Camera demo", StackSlug: "camera-demo",
+			StackURL: "https://camera-demo.grafana.net", Status: "running",
+			Progress:     []string{"Creating stack", "Docker Compose is running"},
+			OTLPEndpoint: "https://secret-endpoint.example/otlp", InstanceID: "12345",
+			Error: "secret diagnostic output",
+		}},
+	}
+
+	got := briefContext(session)
+	for _, expected := range []string{
+		`"sessionState":"Running"`, `"iteration":8`, `"prototypeIteration":7`,
+		`"stackSlug":"camera-demo"`, `"status":"running"`, `"latestProgress":"Docker Compose is running"`,
+		"operational state above comes from the compiler's persisted build and deployment records and is authoritative",
+		"it is not a live health check", "Only describe telemetry as verified when the deployment status is verified",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("brief context missing %q: %s", expected, got)
+		}
+	}
+	for _, sensitive := range []string{"secret-endpoint.example", "12345", "/private/generated/demo", "secret diagnostic output", "New iteration not deployed"} {
+		if strings.Contains(got, sensitive) {
+			t.Fatalf("brief context exposed deployment credential metadata %q: %s", sensitive, got)
+		}
+	}
+}

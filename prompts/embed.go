@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const Version = "v2.3"
+const Version = "v2.4"
 
 //go:embed v2/shared-constitution.md
 var sharedConstitution string
