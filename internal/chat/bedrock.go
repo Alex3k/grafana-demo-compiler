@@ -489,9 +489,9 @@ func confirmedBriefFacts(brief *domain.LivingBrief) string {
 func roleContext(ctx context.Context, session domain.Session, role string, parentGenerationIDs ...string) (context.Context, string) {
 	generationID := agentobservability.NewGenerationID()
 	visibility := "internal"
+	ctx = agento11y.WithConversationID(ctx, session.ID)
+	ctx = agento11y.WithConversationTitle(ctx, session.Title)
 	if role == roleCollaborator {
-		ctx = agento11y.WithConversationID(ctx, session.ID)
-		ctx = agento11y.WithConversationTitle(ctx, session.Title)
 		visibility = "user"
 	}
 	ctx = agento11y.WithAgentName(ctx, observability.AgentName+"/"+role)

@@ -1,11 +1,29 @@
 package chat
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/grafana/agento11y/go/agento11y"
+
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 )
+
+func TestRoleContextAssociatesInternalAgentsWithSessionConversation(t *testing.T) {
+	session := domain.Session{ID: "session-123", Title: "Camera fleet demo"}
+	ctx, _ := roleContext(context.Background(), session, roleBuilder)
+
+	if got, ok := agento11y.ConversationIDFromContext(ctx); !ok || got != session.ID {
+		t.Fatalf("conversation ID = %q, %v; want %q, true", got, ok, session.ID)
+	}
+	if got, ok := agento11y.ConversationTitleFromContext(ctx); !ok || got != session.Title {
+		t.Fatalf("conversation title = %q, %v; want %q, true", got, ok, session.Title)
+	}
+	if got := agento11y.TagsFromContext(ctx)["generation.visibility"]; got != "internal" {
+		t.Fatalf("generation visibility = %q, want internal", got)
+	}
+}
 
 func TestModelMessagesKeepsCompletedConversationOnly(t *testing.T) {
 	messages := []domain.Message{
