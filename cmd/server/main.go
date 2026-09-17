@@ -60,7 +60,7 @@ func run(logger *slog.Logger) error {
 	}
 	server := &http.Server{
 		Addr:              envOrDefault("DEMO_COMPILER_ADDR", ":8080"),
-		Handler:           httpapi.New(dataStore, chatService, o11y, logger, webFiles),
+		Handler:           httpapi.New(dataStore, chatService, o11y, logger, filepath.Join(dataDir, "sessions"), webFiles),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

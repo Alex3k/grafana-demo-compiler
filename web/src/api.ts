@@ -53,12 +53,24 @@ export async function streamBriefThreadMessage(
   return stream(`/api/sessions/${sessionId}/brief-threads/${threadId}/messages`, content, onEvent);
 }
 
+export async function streamPrototype(
+  sessionId: string,
+  onEvent: (event: StreamEvent) => void,
+): Promise<void> {
+  const response = await fetch(`/api/sessions/${sessionId}/prototypes`, { method: "POST" });
+  return readStream(response, onEvent, new Set(["prototype_completed", "error"]));
+}
+
 async function stream(path: string, content: string, onEvent: (event: StreamEvent) => void): Promise<void> {
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
   });
+  return readStream(response, onEvent, new Set(["turn_completed", "error"]));
+}
+
+async function readStream(response: Response, onEvent: (event: StreamEvent) => void, terminalEvents: Set<string>): Promise<void> {
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
     throw new Error(payload.error ?? `Request failed (${response.status})`);
@@ -83,7 +95,7 @@ async function stream(path: string, content: string, onEvent: (event: StreamEven
         event,
         data: JSON.parse(dataLine.slice(6)) as Message | Record<string, string>,
       });
-      if (event === "turn_completed" || event === "error") {
+      if (terminalEvents.has(event)) {
         await reader.cancel();
         return;
       }

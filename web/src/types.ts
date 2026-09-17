@@ -18,6 +18,22 @@ export interface Session {
   updatedAt: string;
   messages?: Message[];
   brief?: LivingBrief;
+  prototypes?: PrototypeIteration[];
+}
+
+export interface PrototypeIteration {
+  id: string;
+  sessionId: string;
+  number: number;
+  briefVersion: number;
+  status: "generating" | "complete" | "failed";
+  rootPath: string;
+  summary: string;
+  artifacts: Array<{ path: string; size: number }>;
+  checks: Array<{ name: string; status: "passed" | "failed"; detail: string }>;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type BriefStatus = "unknown" | "proposed" | "confirmed";

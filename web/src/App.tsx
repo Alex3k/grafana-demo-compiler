@@ -2,8 +2,8 @@ import { FormEvent, useEffect, useId, useRef, useState } from "react";
 import mermaid from "mermaid";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api, streamBriefThreadMessage, streamMessage } from "./api";
-import type { BriefFocus, BriefItem, BriefThread, Health, LivingBrief, Message, Session, StreamEvent } from "./types";
+import { api, streamBriefThreadMessage, streamMessage, streamPrototype } from "./api";
+import type { BriefFocus, BriefItem, BriefThread, Health, LivingBrief, Message, PrototypeIteration, Session, StreamEvent } from "./types";
 
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
 
@@ -33,6 +33,8 @@ function App() {
   const [topicSending, setTopicSending] = useState(false);
   const [topicConfirming, setTopicConfirming] = useState(false);
   const [topicError, setTopicError] = useState("");
+  const [prototypeBusy, setPrototypeBusy] = useState(false);
+  const [prototypeProgress, setPrototypeProgress] = useState("");
   const conversationRef = useRef<HTMLElement>(null);
   const stickToBottomRef = useRef(true);
   const sendingRef = useRef(false);
@@ -155,6 +157,39 @@ function App() {
     }
   }
 
+  async function buildPrototype() {
+    if (!active || sendingRef.current || prototypeBusy) return;
+    const sessionId = active.id;
+    sendingRef.current = true;
+    setSending(true);
+    setPrototypeBusy(true);
+    setPrototypeProgress("Starting a new local prototype iteration");
+    setError("");
+    try {
+      await streamPrototype(sessionId, (streamEvent) => {
+        if (streamEvent.event === "prototype_progress") {
+          setPrototypeProgress((streamEvent.data as { message: string }).message);
+        } else if (streamEvent.event === "activity") {
+          applyStreamEvent(sessionId, streamEvent);
+        } else if (streamEvent.event === "prototype_started" || streamEvent.event === "prototype_completed") {
+          const iteration = streamEvent.data as PrototypeIteration;
+          setActive((current) => current && current.id === sessionId
+            ? { ...current, prototypes: [iteration, ...(current.prototypes ?? []).filter((item) => item.id !== iteration.id)] }
+            : current);
+        }
+      });
+      setActive(await api.session(sessionId));
+      await refreshSessions();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The prototype could not be generated.");
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+      setPrototypeBusy(false);
+      setPrototypeProgress("");
+    }
+  }
+
   function applyTopicStreamEvent(streamEvent: StreamEvent) {
     if (streamEvent.event === "turn_completed" || streamEvent.event === "error") setTopicSending(false);
     setTopicThread((current) => {
@@ -260,6 +295,9 @@ function App() {
           health={health}
           onClose={() => setRailOpen(false)}
           onFocusTopic={(focus) => void openTopic(focus)}
+          prototypeBusy={prototypeBusy}
+          prototypeProgress={prototypeProgress}
+          onBuildPrototype={() => void buildPrototype()}
         />
         {topicThread && active && (
           <TopicChat
@@ -442,14 +480,14 @@ function TopicChat({ thread, busy, confirming, error, onSend, onConfirm, onClose
   );
 }
 
-function ContextRail({ open, session, health, onClose, onFocusTopic }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void }) {
+function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBusy, prototypeProgress, onBuildPrototype }: { open: boolean; session: Session | null; health: Health; onClose: () => void; onFocusTopic: (focus: BriefFocus) => void; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void }) {
   return (
     <aside className={`context-rail ${open ? "drawer-open" : ""}`}>
       <div className="panel-mobile-header"><strong>Session context</strong><button onClick={onClose}>×</button></div>
       <p className="eyebrow">SESSION STATUS</p>
       <div className="status-card"><span className="status-dot good" /><div><strong>{session?.state ?? "No session"}</strong><small>Conversation and decisions are saved locally</small></div></div>
       <p className="eyebrow rail-section">LIVING BRIEF</p>
-      {session?.brief ? <BriefPanel brief={session.brief} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
+      {session?.brief ? <BriefPanel brief={session.brief} prototypes={session.prototypes ?? []} prototypeBusy={prototypeBusy} prototypeProgress={prototypeProgress} onBuildPrototype={onBuildPrototype} onFocusTopic={onFocusTopic} /> : <div className="brief-empty"><strong>Building shared context</strong><p>The brief, narrative, and architecture will appear after the next exchange.</p></div>}
       <p className="eyebrow rail-section">CONNECTIONS</p>
       <Connection name="SQLite" status={health.sqlite.status} detail="Persistent session store" />
       <Connection name="Amazon Bedrock" status={health.bedrock.status} detail={health.bedrock.modelId || "Model not configured"} />
@@ -463,7 +501,7 @@ function Connection({ name, status, detail }: { name: string; status: string; de
   return <div className="connection"><span className={`status-dot ${healthy ? "good" : status === "error" ? "bad" : "warn"}`} /><div><strong>{name}</strong><small>{detail}</small></div></div>;
 }
 
-function BriefPanel({ brief, onFocusTopic }: { brief: LivingBrief; onFocusTopic: (focus: BriefFocus) => void }) {
+function BriefPanel({ brief, prototypes, prototypeBusy, prototypeProgress, onBuildPrototype, onFocusTopic }: { brief: LivingBrief; prototypes: PrototypeIteration[]; prototypeBusy: boolean; prototypeProgress: string; onBuildPrototype: () => void; onFocusTopic: (focus: BriefFocus) => void }) {
   const content = brief.content;
   const coreItems: Array<[string, BriefItem]> = [
     ["Audience", content.audience],
@@ -489,7 +527,7 @@ function BriefPanel({ brief, onFocusTopic }: { brief: LivingBrief; onFocusTopic:
       <ArchitectureSection source={content.mermaid} />
       {!!content.openQuestions.length && <BriefSection title={`Open questions · ${content.openQuestions.length}`} open><ul className="question-list">{content.openQuestions.map((question) => <li key={question}>{question}</li>)}</ul></BriefSection>}
       {!!content.decisions.length && <BriefSection title="Decisions"><ul className="decision-list">{content.decisions.map((decision) => <li key={`${decision.summary}-${decision.evidence}`}><StatusPill status={decision.status} /> <span>{decision.summary}</span></li>)}</ul></BriefSection>}
-      <PrototypeCard offer={content.prototypeOffer} />
+      <PrototypeCard offer={content.prototypeOffer} iteration={prototypes[0]} busy={prototypeBusy} progress={prototypeProgress} onBuild={onBuildPrototype} />
       {content.acceptance.accepted && <AlignmentCard acceptance={content.acceptance} />}
     </div>
   );
@@ -563,8 +601,21 @@ function MermaidDiagram({ source }: { source: string }) {
   return <div className="mermaid-wrap">{error && <p className="mermaid-error">{error}</p>}{svg && <div className="mermaid-svg" dangerouslySetInnerHTML={{ __html: svg }} />}</div>;
 }
 
-function PrototypeCard({ offer }: { offer: LivingBrief["content"]["prototypeOffer"] }) {
-  return <div className={`prototype-card ${offer.ready ? "is-ready" : ""}`}><span>{offer.ready ? "PROTOTYPE READY" : "PROTOTYPE NOT READY"}</span><p>{offer.summary || "Keep shaping the audience, outcome, and scenario before building."}</p>{offer.ready && <small>Ask to prototype now, reduce the slice, or continue planning.</small>}</div>;
+function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: LivingBrief["content"]["prototypeOffer"]; iteration?: PrototypeIteration; busy: boolean; progress: string; onBuild: () => void }) {
+  return <div className={`prototype-card ${offer.ready ? "is-ready" : ""}`}>
+    <span>{offer.ready ? "PROTOTYPE READY" : "PROTOTYPE NOT READY"}</span>
+    <p>{offer.summary || "Keep shaping the audience, outcome, and scenario before building."}</p>
+    {offer.ready && <button type="button" onClick={onBuild} disabled={busy}>{busy ? "Building…" : iteration ? "Build next iteration" : "Build prototype"}</button>}
+    {busy && <small className="prototype-progress"><span className="activity-pulse" />{progress}</small>}
+    {iteration && <div className={`prototype-result result-${iteration.status}`}>
+      <strong>Iteration {iteration.number} · {iteration.status}</strong>
+      {iteration.summary && <p>{iteration.summary}</p>}
+      <small>{iteration.artifacts.length} files · {iteration.checks.filter((check) => check.status === "passed").length}/{iteration.checks.length} checks passed</small>
+      {iteration.error && <small className="prototype-error">{iteration.error}</small>}
+      <details><summary>Validation and files</summary><ul>{iteration.checks.map((check) => <li key={check.name} className={`check-${check.status}`}><strong>{check.name}</strong><span>{check.detail}</span></li>)}{iteration.artifacts.map((artifact) => <li key={artifact.path}><code>{artifact.path}</code></li>)}</ul></details>
+      <small className="prototype-path">Saved at {iteration.rootPath}</small>
+    </div>}
+  </div>;
 }
 
 function AlignmentCard({ acceptance }: { acceptance: LivingBrief["content"]["acceptance"] }) {

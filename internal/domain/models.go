@@ -3,13 +3,40 @@ package domain
 import "time"
 
 type Session struct {
-	ID        string       `json:"id"`
-	Title     string       `json:"title"`
-	State     string       `json:"state"`
-	CreatedAt time.Time    `json:"createdAt"`
-	UpdatedAt time.Time    `json:"updatedAt"`
-	Messages  []Message    `json:"messages,omitempty"`
-	Brief     *LivingBrief `json:"brief,omitempty"`
+	ID         string               `json:"id"`
+	Title      string               `json:"title"`
+	State      string               `json:"state"`
+	CreatedAt  time.Time            `json:"createdAt"`
+	UpdatedAt  time.Time            `json:"updatedAt"`
+	Messages   []Message            `json:"messages,omitempty"`
+	Brief      *LivingBrief         `json:"brief,omitempty"`
+	Prototypes []PrototypeIteration `json:"prototypes,omitempty"`
+}
+
+type PrototypeArtifact struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
+type PrototypeCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+type PrototypeIteration struct {
+	ID           string              `json:"id"`
+	SessionID    string              `json:"sessionId"`
+	Number       int                 `json:"number"`
+	BriefVersion int                 `json:"briefVersion"`
+	Status       string              `json:"status"`
+	RootPath     string              `json:"rootPath"`
+	Summary      string              `json:"summary"`
+	Artifacts    []PrototypeArtifact `json:"artifacts"`
+	Checks       []PrototypeCheck    `json:"checks"`
+	Error        string              `json:"error,omitempty"`
+	CreatedAt    time.Time           `json:"createdAt"`
+	UpdatedAt    time.Time           `json:"updatedAt"`
 }
 
 type Message struct {

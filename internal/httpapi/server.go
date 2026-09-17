@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,15 +20,16 @@ import (
 )
 
 type Server struct {
-	store *store.Store
-	chat  *chat.Service
-	o11y  *observability.Runtime
-	log   *slog.Logger
-	web   fs.FS
+	store         *store.Store
+	chat          *chat.Service
+	o11y          *observability.Runtime
+	log           *slog.Logger
+	web           fs.FS
+	prototypeRoot string
 }
 
-func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.Runtime, logger *slog.Logger, web fs.FS) http.Handler {
-	server := &Server{store: dataStore, chat: chatService, o11y: o11y, log: logger, web: web}
+func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.Runtime, logger *slog.Logger, prototypeRoot string, web fs.FS) http.Handler {
+	server := &Server{store: dataStore, chat: chatService, o11y: o11y, log: logger, web: web, prototypeRoot: prototypeRoot}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /api/sessions", server.listSessions)
@@ -35,6 +37,7 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 	mux.HandleFunc("GET /api/sessions/{id}", server.getSession)
 	mux.HandleFunc("PATCH /api/sessions/{id}", server.renameSession)
 	mux.HandleFunc("POST /api/sessions/{id}/messages", server.createMessage)
+	mux.HandleFunc("POST /api/sessions/{id}/prototypes", server.createPrototype)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads", server.openBriefThread)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/messages", server.createBriefThreadMessage)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/confirm", server.confirmBriefThread)
@@ -45,6 +48,143 @@ func New(dataStore *store.Store, chatService *chat.Service, o11y *observability.
 		mux.Handle("/", spaHandler(web))
 	}
 	return recoverMiddleware(logger, requestLogMiddleware(logger, mux))
+}
+
+func (s *Server) createPrototype(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.writeError(w, http.StatusInternalServerError, "Streaming is unavailable", nil)
+		return
+	}
+	session, err := s.store.GetSession(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		s.writeError(w, http.StatusNotFound, "Session not found", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not load session", err)
+		return
+	}
+	if session.Brief == nil || !session.Brief.Content.PrototypeOffer.Ready {
+		s.writeError(w, http.StatusConflict, "The living brief does not yet contain a prototype offer", nil)
+		return
+	}
+	iteration, err := s.store.CreatePrototypeIteration(r.Context(), session.ID, session.Brief.Version)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Could not create prototype iteration", err)
+		return
+	}
+	shortID := iteration.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	iteration.RootPath = filepath.Join(s.prototypeRoot, session.ID, "iterations", fmt.Sprintf("%03d-%s", iteration.Number, shortID))
+	operation, err := s.store.CreateOperation(r.Context(), domain.Operation{
+		SessionID: session.ID,
+		Kind:      "prototype_generation",
+		Status:    "running",
+		Summary:   fmt.Sprintf("Building prototype iteration %d", iteration.Number),
+	})
+	if err != nil {
+		iteration.Status = "failed"
+		iteration.Error = err.Error()
+		_ = s.store.FinishPrototypeIteration(r.Context(), iteration)
+		s.writeError(w, http.StatusInternalServerError, "Could not start prototype generation", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	_ = writeEvent(w, flusher, "prototype_started", iteration)
+	activity, _ := s.store.CreateMessage(r.Context(), domain.Message{
+		SessionID: session.ID, Role: "system", Kind: "activity",
+		Content: fmt.Sprintf("Building local prototype iteration %d", iteration.Number), Status: "complete",
+	})
+	_ = writeEvent(w, flusher, "activity", activity)
+
+	buildCtx, cancelBuild := context.WithTimeout(r.Context(), 7*time.Minute)
+	defer cancelBuild()
+	type buildOutcome struct {
+		result chat.PrototypeResult
+		err    error
+	}
+	progress := make(chan string, 100)
+	completed := make(chan buildOutcome, 1)
+	go func() {
+		result, err := s.chat.BuildPrototype(buildCtx, session, iteration.RootPath, func(message string) {
+			select {
+			case progress <- message:
+			default:
+			}
+		})
+		completed <- buildOutcome{result: result, err: err}
+	}()
+	heartbeat := time.NewTicker(10 * time.Second)
+	defer heartbeat.Stop()
+	var result chat.PrototypeResult
+	var buildErr error
+buildLoop:
+	for {
+		select {
+		case message := <-progress:
+			if err := writeEvent(w, flusher, "prototype_progress", map[string]string{"message": message}); err != nil {
+				cancelBuild()
+				buildErr = err
+				break buildLoop
+			}
+		case outcome := <-completed:
+			result, buildErr = outcome.result, outcome.err
+			break buildLoop
+		case <-heartbeat.C:
+			if err := writeEvent(w, flusher, "prototype_progress", map[string]string{"message": "Still building the local prototype"}); err != nil {
+				cancelBuild()
+				buildErr = err
+				break buildLoop
+			}
+		case <-buildCtx.Done():
+			buildErr = buildCtx.Err()
+			break buildLoop
+		}
+	}
+	iteration.Summary = result.Summary
+	iteration.Artifacts = result.Artifacts
+	iteration.Checks = result.Checks
+	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelPersist()
+	if buildErr != nil {
+		iteration.Status = "failed"
+		iteration.Error = buildErr.Error()
+		_ = s.store.FinishOperation(persistCtx, operation.ID, "failed", "Prototype generation failed", buildErr.Error())
+	} else if failedPrototypeChecks(result.Checks) {
+		iteration.Status = "failed"
+		iteration.Error = "Prototype validation failed"
+		_ = s.store.FinishOperation(persistCtx, operation.ID, "failed", "Prototype validation failed", iteration.Error)
+	} else {
+		iteration.Status = "complete"
+		_ = s.store.FinishOperation(persistCtx, operation.ID, "complete", "Prototype generated and validated", "")
+	}
+	if err := s.store.FinishPrototypeIteration(persistCtx, iteration); err != nil {
+		s.log.Error("save prototype iteration", "sessionId", session.ID, "iterationId", iteration.ID, "error", err)
+		iteration.Status = "failed"
+		iteration.Error = "Could not save prototype result"
+	}
+	completion := fmt.Sprintf("Prototype iteration %d %s", iteration.Number, iteration.Status)
+	activity, _ = s.store.CreateMessage(persistCtx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: completion, Status: "complete"})
+	_ = writeEvent(w, flusher, "activity", activity)
+	_ = writeEvent(w, flusher, "prototype_completed", iteration)
+}
+
+func failedPrototypeChecks(checks []domain.PrototypeCheck) bool {
+	if len(checks) == 0 {
+		return true
+	}
+	for _, check := range checks {
+		if check.Status != "passed" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

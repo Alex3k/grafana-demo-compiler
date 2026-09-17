@@ -16,14 +16,18 @@ import (
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
 	"github.com/Alex3k/grafana-demo-compiler/internal/observability"
+	"github.com/Alex3k/grafana-demo-compiler/internal/prototype"
 	appPrompts "github.com/Alex3k/grafana-demo-compiler/prompts"
 )
 
 const (
-	roleCollaborator = "demo-collaborator"
-	roleCurator      = "living-brief-curator"
-	roleEvaluator    = "requirement-evaluator"
-	briefUpdateTool  = "propose_brief_update"
+	roleCollaborator      = "demo-collaborator"
+	roleCurator           = "living-brief-curator"
+	roleEvaluator         = "requirement-evaluator"
+	roleBuilder           = "prototype-builder"
+	briefUpdateTool       = "propose_brief_update"
+	writeDemoFileTool     = "write_demo_file"
+	validatePrototypeTool = "validate_prototype"
 )
 
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
@@ -47,6 +51,24 @@ type BriefResult struct {
 type EvaluationResult struct {
 	Evaluation   domain.AlignmentEvaluation
 	GenerationID string
+}
+
+type PrototypeResult struct {
+	Summary      string
+	Artifacts    []domain.PrototypeArtifact
+	Checks       []domain.PrototypeCheck
+	GenerationID string
+}
+
+type writeDemoFileInput struct {
+	Path    string `json:"path" jsonschema:"description=Relative path for the prototype file"`
+	Content string `json:"content" jsonschema:"description=Complete file content"`
+}
+
+type prototypeValidationInput struct{}
+
+type prototypeValidationOutput struct {
+	Checks []domain.PrototypeCheck `json:"checks"`
 }
 
 type briefUpdateReceipt struct {
@@ -305,6 +327,85 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 		return EvaluationResult{}, fmt.Errorf("decode requirement evaluation: %w", err)
 	}
 	return EvaluationResult{Evaluation: normalizeEvaluation(evaluation), GenerationID: generationID}, nil
+}
+
+func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, root string, onProgress func(string)) (PrototypeResult, error) {
+	if !s.Configured() {
+		return PrototypeResult{}, ErrNotConfigured
+	}
+	if session.Brief == nil || !session.Brief.Content.PrototypeOffer.Ready {
+		return PrototypeResult{}, errors.New("the living brief is not ready to prototype")
+	}
+	workspace, err := prototype.New(root)
+	if err != nil {
+		return PrototypeResult{}, err
+	}
+
+	writeTool, err := aisdk.TypedTool(aisdk.TypedToolDef[writeDemoFileInput, domain.PrototypeArtifact]{
+		Name:        writeDemoFileTool,
+		Title:       "Write demo file",
+		Description: "Write one complete file inside the current local prototype revision.",
+		Execute: func(_ context.Context, input writeDemoFileInput, _ aisdk.ToolExecutionOptions) (domain.PrototypeArtifact, error) {
+			artifact, err := workspace.WriteFile(input.Path, input.Content)
+			if err == nil && onProgress != nil {
+				onProgress("Wrote " + artifact.Path)
+			}
+			return artifact, err
+		},
+	})
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("create prototype writer tool: %w", err)
+	}
+	var checks []domain.PrototypeCheck
+	validateTool, err := aisdk.TypedTool(aisdk.TypedToolDef[prototypeValidationInput, prototypeValidationOutput]{
+		Name:        validatePrototypeTool,
+		Title:       "Validate prototype",
+		Description: "Run the fixed local prototype checks. This does not start containers or deploy resources.",
+		Execute: func(toolCtx context.Context, _ prototypeValidationInput, _ aisdk.ToolExecutionOptions) (prototypeValidationOutput, error) {
+			if onProgress != nil {
+				onProgress("Validating the prototype")
+			}
+			checks = workspace.Validate(toolCtx)
+			return prototypeValidationOutput{Checks: checks}, nil
+		},
+	})
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("create prototype validation tool: %w", err)
+	}
+
+	payload, err := json.Marshal(struct {
+		Title string             `json:"title"`
+		Brief domain.LivingBrief `json:"livingBrief"`
+	}{Title: session.Title, Brief: *session.Brief})
+	if err != nil {
+		return PrototypeResult{}, fmt.Errorf("encode prototype context: %w", err)
+	}
+	ctx, generationID := roleContext(ctx, session, roleBuilder)
+	stream := aisdk.StreamText(ctx, s.model,
+		aisdk.WithSystem(appPrompts.Builder()),
+		aisdk.WithModelMessages(provider.UserText(string(payload))),
+		aisdk.WithTools(aisdk.ToolSet{writeDemoFileTool: writeTool, validatePrototypeTool: validateTool}),
+		aisdk.WithStopWhen(aisdk.StepCountIs(40)),
+		aisdk.WithMaxOutputTokens(6000),
+		aisdk.WithMaxRetries(1),
+	)
+	for part := range stream.FullStream() {
+		if streamError, ok := part.(aisdk.StreamError); ok && streamError.Error != nil {
+			return PrototypeResult{}, fmt.Errorf("build prototype: %w", streamError.Error)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return PrototypeResult{}, fmt.Errorf("build prototype: %w", err)
+	}
+	if len(checks) == 0 {
+		return PrototypeResult{}, fmt.Errorf("build prototype: model did not call %s", validatePrototypeTool)
+	}
+	return PrototypeResult{
+		Summary:      sanitizeAssistantText(stream.Text()),
+		Artifacts:    workspace.Artifacts(),
+		Checks:       checks,
+		GenerationID: generationID,
+	}, nil
 }
 
 func stripJSONFence(value string) string {
