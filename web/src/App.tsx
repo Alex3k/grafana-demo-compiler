@@ -602,6 +602,8 @@ function MermaidDiagram({ source }: { source: string }) {
 }
 
 function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: LivingBrief["content"]["prototypeOffer"]; iteration?: PrototypeIteration; busy: boolean; progress: string; onBuild: () => void }) {
+  const artifacts = iteration?.artifacts ?? [];
+  const checks = iteration?.checks ?? [];
   return <div className={`prototype-card ${offer.ready ? "is-ready" : ""}`}>
     <span>{offer.ready ? "PROTOTYPE READY" : "PROTOTYPE NOT READY"}</span>
     <p>{offer.summary || "Keep shaping the audience, outcome, and scenario before building."}</p>
@@ -610,9 +612,9 @@ function PrototypeCard({ offer, iteration, busy, progress, onBuild }: { offer: L
     {iteration && <div className={`prototype-result result-${iteration.status}`}>
       <strong>Iteration {iteration.number} · {iteration.status}</strong>
       {iteration.summary && <p>{iteration.summary}</p>}
-      <small>{iteration.artifacts.length} files · {iteration.checks.filter((check) => check.status === "passed").length}/{iteration.checks.length} checks passed</small>
+      <small>{artifacts.length} files · {checks.filter((check) => check.status === "passed").length}/{checks.length} checks passed</small>
       {iteration.error && <small className="prototype-error">{iteration.error}</small>}
-      <details><summary>Validation and files</summary><ul>{iteration.checks.map((check) => <li key={check.name} className={`check-${check.status}`}><strong>{check.name}</strong><span>{check.detail}</span></li>)}{iteration.artifacts.map((artifact) => <li key={artifact.path}><code>{artifact.path}</code></li>)}</ul></details>
+      <details><summary>Validation and files</summary><ul>{checks.map((check) => <li key={check.name} className={`check-${check.status}`}><strong>{check.name}</strong><span>{check.detail}</span></li>)}{artifacts.map((artifact) => <li key={artifact.path}><code>{artifact.path}</code></li>)}</ul></details>
       <small className="prototype-path">Saved at {iteration.rootPath}</small>
     </div>}
   </div>;

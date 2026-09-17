@@ -263,6 +263,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`, iteration.ID, sessionID, number, briefVersion, it
 }
 
 func (s *Store) FinishPrototypeIteration(ctx context.Context, iteration domain.PrototypeIteration) error {
+	if iteration.Artifacts == nil {
+		iteration.Artifacts = []domain.PrototypeArtifact{}
+	}
+	if iteration.Checks == nil {
+		iteration.Checks = []domain.PrototypeCheck{}
+	}
 	artifacts, err := json.Marshal(iteration.Artifacts)
 	if err != nil {
 		return fmt.Errorf("encode prototype artifacts: %w", err)
@@ -317,6 +323,12 @@ FROM prototype_iterations WHERE session_id = ? ORDER BY iteration_number DESC`, 
 		}
 		if err := json.Unmarshal([]byte(checks), &iteration.Checks); err != nil {
 			return nil, fmt.Errorf("decode prototype checks: %w", err)
+		}
+		if iteration.Artifacts == nil {
+			iteration.Artifacts = []domain.PrototypeArtifact{}
+		}
+		if iteration.Checks == nil {
+			iteration.Checks = []domain.PrototypeCheck{}
 		}
 		iteration.CreatedAt, err = parseTime(created)
 		if err != nil {
