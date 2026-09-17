@@ -34,7 +34,8 @@ function App() {
   const [topicConfirming, setTopicConfirming] = useState(false);
   const [topicError, setTopicError] = useState("");
   const [prototypeBusy, setPrototypeBusy] = useState(false);
-  const [prototypeProgress, setPrototypeProgress] = useState("");
+  const [prototypeActivity, setPrototypeActivity] = useState<string[]>([]);
+  const [showBuildDetails, setShowBuildDetails] = useState(() => localStorage.getItem("showBuildDetails") !== "false");
   const conversationRef = useRef<HTMLElement>(null);
   const stickToBottomRef = useRef(true);
   const sendingRef = useRef(false);
@@ -163,12 +164,13 @@ function App() {
     sendingRef.current = true;
     setSending(true);
     setPrototypeBusy(true);
-    setPrototypeProgress("Starting a new local prototype iteration");
+    setPrototypeActivity(["Starting a new local prototype iteration"]);
     setError("");
     try {
       await streamPrototype(sessionId, (streamEvent) => {
         if (streamEvent.event === "prototype_progress") {
-          setPrototypeProgress((streamEvent.data as { message: string }).message);
+          const message = (streamEvent.data as { message: string }).message;
+          setPrototypeActivity((current) => current[current.length - 1] === message ? current : [...current, message].slice(-8));
         } else if (streamEvent.event === "activity") {
           applyStreamEvent(sessionId, streamEvent);
         } else if (streamEvent.event === "prototype_started" || streamEvent.event === "prototype_completed") {
@@ -186,7 +188,7 @@ function App() {
       sendingRef.current = false;
       setSending(false);
       setPrototypeBusy(false);
-      setPrototypeProgress("");
+      setPrototypeActivity([]);
     }
   }
 
@@ -277,6 +279,11 @@ function App() {
                 containerRef={conversationRef}
                 onScrollPositionChange={(atBottom) => { stickToBottomRef.current = atBottom; }}
               />
+              {prototypeBusy && <BuildActivity steps={prototypeActivity} detailed={showBuildDetails} onToggle={() => {
+                const next = !showBuildDetails;
+                setShowBuildDetails(next);
+                localStorage.setItem("showBuildDetails", String(next));
+              }} />}
               {error && <div className="error-banner">{error}</div>}
               <Composer
                 busy={sending}
@@ -296,7 +303,7 @@ function App() {
           onClose={() => setRailOpen(false)}
           onFocusTopic={(focus) => void openTopic(focus)}
           prototypeBusy={prototypeBusy}
-          prototypeProgress={prototypeProgress}
+          prototypeProgress={prototypeActivity[prototypeActivity.length - 1] ?? ""}
           onBuildPrototype={() => void buildPrototype()}
         />
         {topicThread && active && (
@@ -313,6 +320,17 @@ function App() {
       </div>
     </div>
   );
+}
+
+function BuildActivity({ steps, detailed, onToggle }: { steps: string[]; detailed: boolean; onToggle: () => void }) {
+  const visibleSteps = detailed ? steps : steps.slice(-1);
+  return <section className="build-activity" aria-live="polite">
+    <div className="build-activity-header"><span className="activity-pulse" /><div><strong>Building your demo</strong><small>{detailed ? "Milestones, tool activity, and validation" : "Current build status"}</small></div><button type="button" onClick={onToggle}>{detailed ? "Hide details" : "Show details"}</button></div>
+    <ol>{visibleSteps.map((step, index) => {
+      const active = !detailed || index === visibleSteps.length - 1;
+      return <li key={`${index}-${step}`} className={active ? "is-active" : "is-complete"}><span>{active ? "●" : "✓"}</span>{step}</li>;
+    })}</ol>
+  </section>;
 }
 
 function TopBar({ focused, onToggleLayout, onOpenSessions, onOpenContext }: { focused: boolean; onToggleLayout: () => void; onOpenSessions: () => void; onOpenContext: () => void }) {

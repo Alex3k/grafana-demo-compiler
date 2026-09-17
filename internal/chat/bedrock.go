@@ -340,16 +340,19 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 	if err != nil {
 		return PrototypeResult{}, err
 	}
+	if onProgress != nil {
+		onProgress("Prepared an isolated workspace for this revision")
+	}
 
 	writeTool, err := aisdk.TypedTool(aisdk.TypedToolDef[writeDemoFileInput, domain.PrototypeArtifact]{
 		Name:        writeDemoFileTool,
 		Title:       "Write demo file",
 		Description: "Write one complete file inside the current local prototype revision.",
 		Execute: func(_ context.Context, input writeDemoFileInput, _ aisdk.ToolExecutionOptions) (domain.PrototypeArtifact, error) {
-			artifact, err := workspace.WriteFile(input.Path, input.Content)
-			if err == nil && onProgress != nil {
-				onProgress("Wrote " + artifact.Path)
+			if onProgress != nil {
+				onProgress("Writing " + input.Path)
 			}
+			artifact, err := workspace.WriteFile(input.Path, input.Content)
 			return artifact, err
 		},
 	})
@@ -363,7 +366,7 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		Description: "Run the fixed local prototype checks. This does not start containers or deploy resources.",
 		Execute: func(toolCtx context.Context, _ prototypeValidationInput, _ aisdk.ToolExecutionOptions) (prototypeValidationOutput, error) {
 			if onProgress != nil {
-				onProgress("Validating the prototype")
+				onProgress("Running local validation checks")
 			}
 			checks = workspace.Validate(toolCtx)
 			return prototypeValidationOutput{Checks: checks}, nil
@@ -381,6 +384,9 @@ func (s *Service) BuildPrototype(ctx context.Context, session domain.Session, ro
 		return PrototypeResult{}, fmt.Errorf("encode prototype context: %w", err)
 	}
 	ctx, generationID := roleContext(ctx, session, roleBuilder)
+	if onProgress != nil {
+		onProgress("Reviewing the approved brief and planning the smallest viable demo")
+	}
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Builder()),
 		aisdk.WithModelMessages(provider.UserText(string(payload))),

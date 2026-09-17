@@ -137,7 +137,7 @@ buildLoop:
 			result, buildErr = outcome.result, outcome.err
 			break buildLoop
 		case <-heartbeat.C:
-			if err := writeEvent(w, flusher, "prototype_progress", map[string]string{"message": "Still building the local prototype"}); err != nil {
+			if err := writeEvent(w, flusher, "prototype_progress", map[string]string{"message": "The builder is preparing the next artifact"}); err != nil {
 				cancelBuild()
 				buildErr = err
 				break buildLoop
