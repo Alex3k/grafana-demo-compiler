@@ -177,8 +177,10 @@ type briefUpdateProposal struct {
 }
 
 type briefAcceptance struct {
-	Accepted bool   `json:"accepted"`
-	Evidence string `json:"evidence"`
+	ProposalMessageID  string `json:"proposalMessageId"`
+	AcceptingMessageID string `json:"acceptingMessageId"`
+	Accepted           bool   `json:"accepted"`
+	Evidence           string `json:"evidence"`
 }
 
 func (proposal briefUpdateProposal) content() domain.BriefContent {
@@ -201,8 +203,10 @@ func (proposal briefUpdateProposal) content() domain.BriefContent {
 		Decisions:        proposal.Decisions,
 		PrototypeOffer:   proposal.PrototypeOffer,
 		Acceptance: domain.PlanAcceptance{
-			Accepted: proposal.Acceptance.Accepted,
-			Evidence: proposal.Acceptance.Evidence,
+			ProposalMessageID:  proposal.Acceptance.ProposalMessageID,
+			AcceptingMessageID: proposal.Acceptance.AcceptingMessageID,
+			Accepted:           proposal.Acceptance.Accepted,
+			Evidence:           proposal.Acceptance.Evidence,
 		},
 	}
 }
@@ -251,6 +255,7 @@ func contextInfo(ctx context.Context) agentobservability.ContextInfo {
 		metadata["context.schema_version"] = manifest.SchemaVersion
 		metadata["context.role"] = string(manifest.Role)
 		metadata["context.brief_version"] = manifest.BriefVersion
+		metadata["context.brief_hash"] = manifest.BriefHash
 		metadata["context.message_count"] = manifest.IncludedMessageCount
 		metadata["context.topic_keys"] = manifest.IncludedTopicKeys
 		metadata["context.includes_operational_state"] = manifest.IncludesOperationalState
@@ -563,6 +568,9 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 			if session.Brief != nil {
 				content = preserveConfirmedBrief(session.Brief.Content, content)
 			}
+			if err := bindAcceptance(previous, &content, packet.DeltaMessages); err != nil {
+				return briefUpdateReceipt{}, err
+			}
 			candidate = &content
 			return briefUpdateReceipt{Status: "draft_received", ChangeCount: len(content.Changes)}, nil
 		},
@@ -601,8 +609,32 @@ func (s *Service) BuildBrief(ctx context.Context, session domain.Session, messag
 func (s *Service) curatorPacket(session domain.Session, messages []domain.Message) (contextengine.CuratorContext, string, error) {
 	compiler := s.compilerFor(appPrompts.Curator(), 4000)
 	delta := conversationalMessages(messages)
+	// The first new user message may accept the proposal immediately before
+	// the cursor. Include that proposal with its ID, within the same budget.
+	if len(delta) > 0 && delta[0].Role == "user" {
+		for index, message := range session.Messages {
+			if message.ID != delta[0].ID {
+				continue
+			}
+			for prior := index - 1; prior >= 0; prior-- {
+				candidate := session.Messages[prior]
+				if candidate.Kind != "message" || candidate.Status != "complete" {
+					continue
+				}
+				if candidate.Role == "assistant" {
+					delta = append([]domain.Message{candidate}, delta...)
+				}
+				break
+			}
+			break
+		}
+	}
 	var overflow error
-	for end := len(delta); end > 0; end-- {
+	minimum := 1
+	if len(delta) > 0 && len(messages) > 0 && delta[0].ID != conversationalMessages(messages)[0].ID {
+		minimum = 2
+	}
+	for end := len(delta); end >= minimum; end-- {
 		packet, err := compiler.Curator(session, delta[:end])
 		if err != nil {
 			if contextengine.IsBudgetOverflow(err) {
@@ -624,13 +656,14 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 	if !s.Configured() {
 		return EvaluationResult{}, ErrNotConfigured
 	}
-	approved := domain.LivingBrief{Content: brief}
-	if session.Brief != nil {
-		approved.Version = session.Brief.Version
-		approved.SourceMessageID = session.Brief.SourceMessageID
-		approved.UpdatedAt = session.Brief.UpdatedAt
+	plan, err := acceptedPlan(brief, messages)
+	if err != nil {
+		return EvaluationResult{}, err
 	}
-	packet, err := s.compilerFor(appPrompts.Evaluator(), 0).Evaluator(approved, acceptedAssistantPlan(messages))
+	// This candidate has not been persisted as a version yet. Its content hash
+	// identifies the evaluated snapshot without borrowing the previous version.
+	approved := domain.LivingBrief{Content: brief}
+	packet, err := s.compilerFor(appPrompts.Evaluator(), 0).Evaluator(approved, plan)
 	if err != nil {
 		s.recordContextOverflow(session.ID, err)
 		return EvaluationResult{}, err
@@ -639,7 +672,8 @@ func (s *Service) EvaluatePlan(ctx context.Context, session domain.Session, brie
 		ApprovedBrief        domain.BriefContent  `json:"approvedBrief"`
 		ExplicitRequirements []contextengine.Fact `json:"explicitRequirements"`
 		CandidatePlan        string               `json:"candidatePlan"`
-	}{packet.ApprovedBrief, packet.ExplicitRequirements, packet.CandidatePlan})
+		BriefHash            string               `json:"briefHash"`
+	}{packet.ApprovedBrief, packet.ExplicitRequirements, packet.CandidatePlan, brief.Acceptance.BriefHash})
 	if err != nil {
 		return EvaluationResult{}, fmt.Errorf("encode requirement evaluation context: %w", err)
 	}
@@ -1076,24 +1110,6 @@ func normalizeEvaluation(evaluation domain.AlignmentEvaluation) domain.Alignment
 	}
 	evaluation.Explanation = strings.TrimSpace(evaluation.Explanation)
 	return evaluation
-}
-
-func acceptedAssistantPlan(messages []domain.Message) string {
-	latestUserIndex := -1
-	for index := len(messages) - 1; index >= 0; index-- {
-		message := messages[index]
-		if message.Kind == "message" && message.Role == "user" && message.Status == "complete" {
-			latestUserIndex = index
-			break
-		}
-	}
-	for index := latestUserIndex - 1; index >= 0; index-- {
-		message := messages[index]
-		if message.Kind == "message" && message.Role == "assistant" && message.Status == "complete" {
-			return message.Content
-		}
-	}
-	return ""
 }
 
 func modelMessages(messages []domain.Message) []provider.Message {

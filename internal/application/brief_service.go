@@ -159,13 +159,18 @@ func (s *BriefService) ConfirmThread(ctx context.Context, sessionID, threadID st
 		return ConfirmedBriefTopic{}, fault(FaultConflict, "The living brief is not ready for a focused confirmation", nil)
 	}
 	content := session.Brief.Content
+	previousHash := content.AcceptanceHash()
 	if !brieftopics.Apply(&content, thread.Focus.TopicID, thread.CandidateValue) {
 		return ConfirmedBriefTopic{}, fault(FaultUnprocessable, "The confirmed topic could not be matched in the living brief", nil)
+	}
+	if content.AcceptanceHash() != previousHash {
+		content.Acceptance = domain.PlanAcceptance{}
 	}
 	brief, err := s.store.ApplyBriefThread(ctx, session.ID, thread.ID, content)
 	if err != nil {
 		return ConfirmedBriefTopic{}, fault(FaultInternal, "Could not save the confirmed topic", err)
 	}
+	s.updateSessionState(ctx, session, content, nil)
 	thread.State = "confirmed"
 	activity, _ := s.store.CreateMessage(ctx, domain.Message{SessionID: session.ID, Role: "system", Kind: "activity", Content: "Confirmed brief topic: " + thread.Focus.Label, Status: "complete"})
 	return ConfirmedBriefTopic{Thread: thread, Brief: brief, Activity: activity}, nil
