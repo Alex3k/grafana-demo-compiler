@@ -45,7 +45,8 @@ does not retry running actions automatically.
 Edit the Markdown files in `guidance/`, or add another `.md` file and rebuild. The
 catalog is generated automatically. The agent reads relevant guidance on demand;
 it is not all pasted into every request. Start with `demo-storytelling.md` and
-`grafana-setup.md`. These are adaptable defaults, not additional hard requirements.
-Keep product constraints in the existing constitution and enforce execution
+`grafana-workflow.md`. Storytelling guidance provides adaptable advice; the
+Grafana workflow adapts official gcx skills to the compiler's tools and approval
+flow. Keep product constraints in the existing constitution and enforce execution
 boundaries in code. No vector database, new orchestration framework, or provider
 migration is involved.

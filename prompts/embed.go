@@ -7,7 +7,7 @@ import (
 	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
 
-const Version = "v2.7"
+const Version = "v2.8"
 
 //go:embed v2/shared-constitution.md
 var sharedConstitution string

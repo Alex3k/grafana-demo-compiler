@@ -22,7 +22,7 @@ func TestReadGCXSkillAvailableWithoutStack(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool, ok := tools["read_gcx_skill"]
-	if !ok || !strings.Contains(instructions, "create-dashboard") {
+	if !ok || !strings.Contains(instructions, "grafana-workflow.md") {
 		t.Fatal("skill tool or routing missing")
 	}
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{"name":"create-dashboard","reference":""}`), aisdk.ToolExecutionOptions{})

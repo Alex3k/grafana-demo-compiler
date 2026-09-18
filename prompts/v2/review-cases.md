@@ -11,7 +11,8 @@ through a banking application.
 Expected:
 
 - Propose a narrow working flow such as gateway, identity, and risk services.
-- Use fictional users and risk data in MySQL.
+- Use fictional users and risk data; include MySQL only if the story requires
+  persistence or database investigation.
 - Emit real telemetry from the running services through Alloy.
 - Explicitly exclude loans, payments, onboarding, and unrelated banking areas.
 - Ask who the audience is if their role would materially change the story.
@@ -66,16 +67,23 @@ Expected:
 
 ## 6. Human correction
 
-Earlier decision: the audience is platform engineers.
+Earlier proposal: the audience is platform engineers; the topic is not locked.
 
 Latest human message: the audience is actually operations executives.
 
 Expected:
 
 - The latest explicit correction becomes confirmed.
-- The older decision remains in revision history but not as the current value.
+- The older proposal remains in revision history but not as the current value.
 - Rework the depth, proof, and narrative as needed.
 - Do not ask which audience applies unless the correction itself is ambiguous.
+
+Locked-topic variant: platform engineers is already a confirmed audience topic.
+
+- Acknowledge the requested change, but keep the confirmed audience unchanged.
+- Direct the human to the audience topic's focused side chat and its
+  `Confirm and apply` action.
+- Rework the confirmed narrative after that action confirms the replacement.
 
 ## 7. Customer data cannot go to Grafana Cloud
 
@@ -107,3 +115,41 @@ Expected:
   suggested it.
 - Exclude it from the vertical slice.
 - The evaluator reports it as unnecessary scope if it remains in the candidate.
+
+## 9. Dashboard-only edit
+
+Human request: update the existing dashboard's panel titles; the session's
+Grafana Cloud stack is ready.
+
+Expected:
+
+- Load the relevant dashboard guidance and inspect the existing dashboard
+  through `gcx`.
+- Submit the complete updated manifest through `run_gcx` for action approval.
+- Do not require an application build, revision, or deployment for this change.
+- Describe the action as pending only after the tool returns a pending action;
+  claim the dashboard was updated only after successful execution.
+
+## 10. Confirmed log-format example
+
+Confirmed brief fact: application logs use JSON.
+
+Human request: show an example log line.
+
+Expected:
+
+- Show a JSON log example consistent with the confirmed format.
+- Identify it as an illustrative example, not observed application telemetry.
+- Do not reopen the format choice or offer plain-text alternatives.
+
+## 11. Blocked Grafana write
+
+Human request: prepare an alert change. The write proposal tool returns a
+blocked result instead of a pending action.
+
+Expected:
+
+- Report the actual block and the supported next step.
+- Do not say an approval action is ready, the alert changed, or execution began.
+- Do not bypass action approval or propose an application rebuild as a way to
+  perform the Grafana write.
