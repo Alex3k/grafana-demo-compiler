@@ -34,7 +34,9 @@ type DeploymentRunner interface {
 	Provision(context.Context, string, string, string, func(string)) (deployment.Stack, error)
 	ResolveOTLP(context.Context, string, string) (string, error)
 	StopLocal(context.Context, string, string, func(string)) error
-	StartLocal(context.Context, string, string, string, string, string, string, func(string)) error
+	PreflightLocal(context.Context, string) error
+	StartLocal(context.Context, string, string, string, string, string, string, string, func(string)) ([]string, error)
+	VerifyTelemetry(context.Context, string, string, []string, time.Time, func(string)) error
 }
 
 type DeploymentService struct {
@@ -299,9 +301,14 @@ func (s *DeploymentService) startLocal(item domain.Deployment, root, token strin
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	appendProgress := s.deploymentProgressAppender(&item)
-	err := s.stopActiveLocalDeployment(ctx, item.ID, appendProgress)
+	startedAt := time.Now().UTC()
+	var services []string
+	err := s.runner.PreflightLocal(ctx, root)
 	if err == nil {
-		err = s.runner.StartLocal(ctx, root, item.StackSlug, item.OTLPEndpoint, item.InstanceID, token, item.SessionID, appendProgress)
+		err = s.stopActiveLocalDeployment(ctx, item.ID, appendProgress)
+	}
+	if err == nil {
+		services, err = s.runner.StartLocal(ctx, root, item.StackSlug, item.OTLPEndpoint, item.InstanceID, token, item.SessionID, item.ID, appendProgress)
 	}
 	token = ""
 	if err != nil {
@@ -309,9 +316,19 @@ func (s *DeploymentService) startLocal(item domain.Deployment, root, token strin
 		item.Error = err.Error()
 		appendProgress("Local deployment failed: " + err.Error())
 	} else {
-		item.Status = "running"
-		appendProgress("Local services are running; telemetry verification is the next step")
+		item.Status = "verifying"
+		appendProgress("Application ready; verifying metrics, logs, and traces in Grafana Cloud")
 		_ = s.store.SetSessionState(context.Background(), item.SessionID, "Running")
+		if err := s.runner.VerifyTelemetry(ctx, item.StackSlug, item.ID, services, startedAt, appendProgress); err != nil {
+			item.Status = "running"
+			item.Error = "Telemetry verification failed: " + err.Error()
+			appendProgress("Application was ready, but telemetry delivery could not be verified. " + item.Error)
+		} else {
+			item.Status = "verified"
+			item.Error = ""
+			appendProgress("Telemetry verified: deployment probes from every application service reached metrics, logs, and traces. Demo-specific queries are not evaluated by this check.")
+			_ = s.store.SetSessionState(context.Background(), item.SessionID, "Verified")
+		}
 	}
 	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelPersist()

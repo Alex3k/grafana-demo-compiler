@@ -1,0 +1,100 @@
+// Code owned by the demo compiler. Regenerate the prototype to update it.
+package telemetry
+
+import (
+ "context"
+ "encoding/json"
+ "errors"
+ "fmt"
+ "net"
+ "net/http"
+ "os"
+ "sync/atomic"
+ "time"
+
+ "go.opentelemetry.io/otel"
+ "go.opentelemetry.io/otel/attribute"
+ "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+ "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+ "go.opentelemetry.io/otel/metric"
+ "go.opentelemetry.io/otel/propagation"
+ metricSDK "go.opentelemetry.io/otel/sdk/metric"
+ "go.opentelemetry.io/otel/sdk/resource"
+ traceSDK "go.opentelemetry.io/otel/sdk/trace"
+)
+
+var ready atomic.Bool
+
+// MarkReady must be called only after the application has initialized successfully.
+func MarkReady() { ready.Store(true) }
+
+func CheckReady(ctx context.Context) error {
+ req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:9464/readyz", nil)
+ if err != nil { return err }
+ response, err := (&http.Client{Timeout: 2*time.Second}).Do(req)
+ if err != nil { return err }
+ defer response.Body.Close()
+ if response.StatusCode != http.StatusOK { return fmt.Errorf("application is not ready: %d", response.StatusCode) }
+ return nil
+}
+
+// Init installs the shared OTLP providers and readiness endpoint. Business
+// instrumentation uses the global providers; business logging remains unchanged.
+func Init(ctx context.Context, serviceName string) (func(context.Context) error, error) {
+ for _, arg := range os.Args[1:] {
+  if arg == "--telemetry-healthcheck" {
+   if err := CheckReady(ctx); err != nil { os.Exit(1) }
+   os.Exit(0)
+  }
+ }
+ if name := os.Getenv("OTEL_SERVICE_NAME"); name != "" { serviceName = name }
+ runID := os.Getenv("DEMO_RUN_ID")
+ if serviceName == "" || runID == "" { return nil, errors.New("OTEL_SERVICE_NAME and DEMO_RUN_ID are required") }
+ ready.Store(false)
+ res := resource.NewSchemaless(attribute.String("service.name", serviceName), attribute.String("demo.run.id", runID))
+ metrics, err := otlpmetrichttp.New(ctx)
+ if err != nil { return nil, err }
+ traces, err := otlptracehttp.New(ctx)
+ if err != nil { _ = metrics.Shutdown(ctx); return nil, err }
+ mp := metricSDK.NewMeterProvider(metricSDK.WithResource(res), metricSDK.WithReader(metricSDK.NewPeriodicReader(metrics, metricSDK.WithInterval(5*time.Second))))
+ tp := traceSDK.NewTracerProvider(traceSDK.WithResource(res), traceSDK.WithBatcher(traces, traceSDK.WithBatchTimeout(time.Second)))
+ cleanup := func(ctx context.Context) error { return errors.Join(mp.Shutdown(ctx), tp.Shutdown(ctx)) }
+ counter, err := mp.Meter("demo.compiler").Int64Counter("demo_compiler_probe_total")
+ if err != nil { _ = cleanup(ctx); return nil, err }
+ listener, err := net.Listen("tcp", ":9464")
+ if err != nil { _ = cleanup(ctx); return nil, err }
+ otel.SetMeterProvider(mp)
+ otel.SetTracerProvider(tp)
+ otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+ mux := http.NewServeMux()
+ mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+  if !ready.Load() { http.Error(w, "initializing", http.StatusServiceUnavailable); return }
+  w.WriteHeader(http.StatusOK)
+ })
+ server := &http.Server{Handler: mux, ReadHeaderTimeout: 3*time.Second}
+ go func() { _ = server.Serve(listener) }()
+ probeCtx, cancel := context.WithCancel(ctx)
+ done := make(chan struct{})
+ go func() {
+  defer close(done)
+  ticker := time.NewTicker(5*time.Second)
+  defer ticker.Stop()
+  for {
+   select {
+   case <-probeCtx.Done(): return
+   case <-ticker.C:
+    if !ready.Load() { continue }
+    counter.Add(probeCtx, 1, metric.WithAttributes(attribute.String("service_name", serviceName), attribute.String("demo_run_id", runID)))
+    _, span := tp.Tracer("demo.compiler").Start(probeCtx, "demo.compiler.probe")
+    span.End()
+    _ = json.NewEncoder(os.Stdout).Encode(map[string]string{"event":"demo.compiler.probe", "service_name":serviceName, "demo_run_id":runID})
+   }
+  }
+ }()
+ return func(ctx context.Context) error {
+  ready.Store(false)
+  cancel()
+  <-done
+  return errors.Join(server.Shutdown(ctx), cleanup(ctx))
+ }, nil
+}

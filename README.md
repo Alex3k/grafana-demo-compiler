@@ -25,12 +25,16 @@ slice rather than a production-ready application platform.
   optional-MySQL policy, Alloy, and disallowed local observability backends.
 - Dedicated per-session Grafana Cloud stack creation through `gcx`.
 - Local Docker Compose startup with protected telemetry configuration.
+- Compiler-owned Go telemetry helpers, Alloy configuration, and runtime wiring.
+- Bounded application readiness and per-service metrics/logs/traces delivery checks.
+- Direct Grafana inspection and approval-backed resource writes using gcx skills.
 - Agent Observability for the compiler's model generations and tool workflow.
 - A local-only deployment API that rejects non-local targets. Broader
   natural-language request and pre-tool guards remain deferred.
 
-Full telemetry verification, Grafana resource creation, presenter tooling, and
-complete runtime controls are intentionally deferred.
+Demo-specific query/story verification, presenter tooling, and complete runtime
+controls remain deferred. Delivery verification proves transport, not the demo's
+business outcome.
 
 ## Product flow
 
@@ -65,6 +69,9 @@ The normal path is:
 7. Supply a Cloud Access Policy token when prompted so the local
    Alloy instance can send telemetry.
 8. Build and start the generated application with Docker Compose.
+   The compiler waits for application readiness, then queries the session stack
+   for deployment-specific probes from every application service. Only successful
+   metrics, logs, and traces checks produce “Telemetry verified”.
 9. Revise application code through prototype iterations. Iterate Grafana
    dashboards, alerts, SLOs, and other resources directly through gcx approval
    and action history, without app revisions or Docker redeployment.
@@ -95,10 +102,13 @@ The LLM workflow uses typed tools rather than relying only on prose:
 - `record_prototype_plan`
 - `write_demo_file`
 - `validate_prototype`
+- `read_guidance` and `read_gcx_skill`
+- `run_gcx` for immediate reads and exact-payload write proposals
+- Prototype inspection and scoped revision tools
 
 Tool implementations constrain writes to the active iteration workspace and
-run fixed application checks. Grafana Cloud and Docker actions are separate,
-narrow backend operations; the browser cannot submit arbitrary shell commands.
+run fixed application checks. Grafana writes require exact-operation approval;
+Docker deployment remains a separate backend action.
 
 ### Backend structure
 
@@ -171,6 +181,7 @@ stateDiagram-v2
     Ready --> Generated: prototype passes generation checks
     Generated --> Generated: build another iteration
     Generated --> Running: Compose startup succeeds
+    Running --> Verified: all services deliver metrics, logs, and traces
     Running --> Generated: build a newer iteration
 ```
 
@@ -183,8 +194,14 @@ stateDiagram-v2
 main-chat context records which prototype iteration a deployment belongs to so
 a newer generated iteration is not confused with an older running one.
 
-`Verified` remains reserved for a later end-to-end check of the application,
-telemetry, approved Grafana resources, and story. It is not claimed today.
+`Verified` means deployment-specific diagnostic probes from every application
+service were observed in metrics, logs, and traces in the session's stack.
+It is a point-in-time transport check, not proof of every business metric,
+dashboard query, fault scenario, or ongoing service health.
+
+The deployment panel distinguishes containers started, application readiness,
+verification in progress, and verified delivery. A verification timeout leaves
+the application running with an explicit error; it does not claim success.
 
 ## Prerequisites
 
@@ -333,6 +350,31 @@ persisted on the session.
 
 ## Validation
 
+### Compiler-owned telemetry foundation
+
+New prototypes receive protected `internal/telemetry/telemetry.go` and
+`alloy/config.alloy` files. The model instruments business behaviour using the
+shared providers; it cannot rewrite exporters or the Alloy pipeline. Each Go
+entrypoint calls `telemetry.Init`, marks readiness with `telemetry.MarkReady`
+after initialization, and provides a Compose healthcheck using its executable's
+`--telemetry-healthcheck` mode. The helper reserves internal port 9464.
+
+At deployment the compiler wires services to `http://alloy:4318`, sets service
+and unique deployment identities, and supplies Cloud credentials only to Alloy.
+Alloy collects logs only from this Compose project's application containers.
+Business logs may retain their agreed format; diagnostic delivery probes are JSON.
+
+Startup waits up to 90 seconds for expected application healthchecks. Verification
+then waits up to 120 seconds for each service's metric counter, log event, and
+trace span, using read-only gcx queries against the standard Cloud datasource UIDs
+`grafanacloud-prom`, `grafanacloud-logs`, and `grafanacloud-traces`. Authentication
+and missing-signal errors remain visible. Probes use a new ID per deployment so
+data from an older build cannot satisfy the check.
+
+Existing prototypes without this foundation must be regenerated. They are not
+silently rewritten; a legacy foundation failure is detected before stopping an
+existing local demo. Narrow revisions of old prototypes do not migrate transport.
+
 Run the repository checks with:
 
 ```bash
@@ -387,16 +429,16 @@ before broader use.
 
 - The runtime currently supports Bedrock only, although the model is
   configurable within Bedrock.
-- Full telemetry verification through `gcx` is not implemented.
-- Grafana dashboards, alerts, SLOs, and other resources are not yet previewed
-  or created by this workflow.
+- Telemetry delivery checks do not validate every story-specific signal or query.
+- Grafana resource changes use explicit approval; approval completion does not
+  automatically start a new model turn.
 - Stop, restart, log viewing, scenario controls, and continuous per-service
   health are incomplete.
 - Generated projects are not required to contain a visual application UI, and
   the compiler does not yet discover or display an `Open demo application`
   link.
-- Long conversations are not yet compacted; the living brief is the intended
-  basis for a future context-window strategy.
+- Context uses a structured living brief and bounded role-specific history;
+  historical summarisation and conversation search are not implemented.
 - In-flight operations are marked interrupted after a server restart rather
   than resumed automatically.
 - Remote application deployment, CI, multi-user collaboration, and generated

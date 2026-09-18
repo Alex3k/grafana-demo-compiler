@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +37,15 @@ func New(root string) (*Workspace, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create prototype workspace: %w", err)
 	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		if err := telemetryconfig.InstallFoundation(root); err != nil {
+			return nil, err
+		}
+	}
 	return &Workspace{root: root, artifacts: make(map[string]int64)}, nil
 }
 
@@ -49,6 +59,13 @@ func (w *Workspace) WriteFile(path, content string) (domain.PrototypeArtifact, e
 	}
 	if !allowedFile(clean) {
 		return domain.PrototypeArtifact{}, fmt.Errorf("file type is not allowed: %s", clean)
+	}
+	if telemetryconfig.IsFoundationPath(clean) {
+		existing, err := os.ReadFile(filepath.Join(w.root, filepath.FromSlash(clean)))
+		if err != nil || string(existing) != content {
+			return domain.PrototypeArtifact{}, fmt.Errorf("%s is compiler-owned; use telemetry.Init and telemetry.MarkReady without editing the foundation", clean)
+		}
+		return domain.PrototypeArtifact{Path: clean, Size: int64(len(existing))}, nil
 	}
 	size := int64(len(content))
 	if size > maxFileBytes {
@@ -104,12 +121,21 @@ func (w *Workspace) Validate(ctx context.Context) []domain.PrototypeCheck {
 		alloyCheck(w.root),
 		composeContentCheck(w.root),
 		telemetryContractCheck(w.root),
+		telemetryFoundationCheck(w.root),
 	}
 	checks = append(checks,
-		commandCheck(ctx, w.root, "Go build", "go", "build", "-mod=mod", "./..."),
+		commandCheck(ctx, w.root, "Go dependencies", "go", "mod", "tidy"),
+		commandCheck(ctx, w.root, "Go build", "go", "build", "-mod=readonly", "./..."),
 		commandCheck(ctx, w.root, "Compose configuration", "docker", "compose", "config", "--quiet"),
 	)
 	return checks
+}
+
+func telemetryFoundationCheck(root string) domain.PrototypeCheck {
+	if err := telemetryconfig.ValidateFoundation(root); err != nil {
+		return fail("Telemetry foundation", err.Error())
+	}
+	return pass("Telemetry foundation", "compiler-owned transport and application readiness hooks are present")
 }
 
 func telemetryContractCheck(root string) domain.PrototypeCheck {
@@ -233,6 +259,11 @@ func commandCheck(ctx context.Context, root, name, command string, args ...strin
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(os.TempDir(), "grafana-demo-compiler-go-cache"))
+	if command == "go" {
+		// Match the generated Linux container build. Tidy includes dependencies
+		// selected by every platform before the readonly build verifies checksums.
+		cmd.Env = append(cmd.Env, "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0", "GOWORK=off", "GOFLAGS=", "GOENV=off")
+	}
 	output, err := cmd.CombinedOutput()
 	detail := strings.TrimSpace(string(output))
 	if len(detail) > 2000 {

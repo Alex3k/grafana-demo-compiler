@@ -210,7 +210,17 @@ func isNotFound(err error) bool {
 	return strings.Contains(message, "not found") || strings.Contains(message, "404")
 }
 
-func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, instanceID, token, projectKey string, progress func(string)) error {
+func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, instanceID, token, projectKey, runID string, progress func(string)) ([]string, error) {
+	var services []string
+	err := r.startLocal(ctx, root, stackSlug, endpoint, instanceID, token, projectKey, runID, &services, progress)
+	return services, err
+}
+
+func (r *Runner) PreflightLocal(_ context.Context, root string) error {
+	return telemetryconfig.ValidateFoundation(root)
+}
+
+func (r *Runner) startLocal(ctx context.Context, root, stackSlug, endpoint, instanceID, token, projectKey, runID string, services *[]string, progress func(string)) error {
 	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) {
 		return errors.New("prototype output path must be absolute")
 	}
@@ -225,6 +235,9 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 		return errors.New("Grafana Cloud OTLP access-policy token is invalid")
 	}
 	if err := ensureDockerignore(root); err != nil {
+		return err
+	}
+	if err := telemetryconfig.ValidateFoundation(root); err != nil {
 		return err
 	}
 	if err := telemetryconfig.Validate(root); err != nil {
@@ -288,6 +301,28 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 	if composeBuildUsesSecret(configuration, token) {
 		return errors.New("Docker Compose build arguments must not contain the Grafana Cloud token")
 	}
+	var resolved map[string]any
+	if err := json.Unmarshal(configuration, &resolved); err != nil {
+		return err
+	}
+	resolvedServices, _ := resolved["services"].(map[string]any)
+	alloy, _ := resolvedServices["alloy"].(map[string]any)
+	if alloy == nil {
+		return errors.New("compiler telemetry requires the Compose service alloy")
+	}
+	cloudEnv := map[string]any{}
+	for key := range telemetryconfig.Environment(telemetryconfig.Connection{}) {
+		cloudEnv[key] = environment[key]
+	}
+	alloy["environment"] = cloudEnv
+	configuration, err = json.Marshal(resolved)
+	if err != nil {
+		return err
+	}
+	configuration, *services, err = telemetryconfig.WireFoundation(configuration, root, project, runID)
+	if err != nil {
+		return fmt.Errorf("wire compiler telemetry: %w", err)
+	}
 	if err := telemetryconfig.ValidateResolved(root, configuration); err != nil {
 		return fmt.Errorf("validate container telemetry environment: %w", err)
 	}
@@ -313,15 +348,8 @@ func (r *Runner) StartLocal(ctx context.Context, root, stackSlug, endpoint, inst
 		return fmt.Errorf("start local Docker Compose application: %w", redactError(err, token))
 	}
 
-	progress("Checking local container health")
-	output, err := runIn(ctx, root, "docker", "compose", "ps", "--format", "json")
-	if err != nil {
-		return fmt.Errorf("check local Docker Compose application: %w", redactError(err, token))
-	}
-	if strings.TrimSpace(string(output)) == "" {
-		return errors.New("Docker Compose started no services")
-	}
-	return nil
+	progress("Containers started; waiting for application readiness")
+	return r.WaitReady(ctx, root, project, *services, progress)
 }
 
 func (r *Runner) StopLocal(ctx context.Context, root, projectKey string, progress func(string)) error {

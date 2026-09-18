@@ -43,7 +43,7 @@ func Prompt() string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return "Grafana telemetry environment contract: deployment owns credentials and supplies " + strings.Join(names, ", ") + ". Use canonical GRAFANA_CLOUD_OTLP_ENDPOINT, GRAFANA_CLOUD_INSTANCE_ID (or GRAFANA_CLOUD_OTLP_USERNAME), and GRAFANA_CLOUD_API_KEY (or GRAFANA_CLOUD_OTLP_PASSWORD) for OTLP. Legacy GRAFANA_OTLP_USER is the instance ID; GRAFANA_PROM_USER and GRAFANA_LOKI_USER are the respective service usernames. Every API_KEY, TOKEN, and PASSWORD value is the raw secret, never base64 or a prebuilt Authorization header. Basic auth must have a nonempty username and raw token password. Reference credentials using sys.env in Alloy, and explicitly pass every referenced variable into its Compose service with environment or env_file: [.env]. A project .env alone does not pass variables into containers. Never hardcode credentials or invent variable names."
+	return "Compiler-owned telemetry foundation: protected internal/telemetry/telemetry.go and alloy/config.alloy are already installed; do not author or edit them. Each Go main must import <module>/internal/telemetry, call shutdown, err := telemetry.Init(context.Background(), <compose-service-name>) before application initialization, handle the error and shutdown, then call telemetry.MarkReady() only after dependencies and business listener are ready. Give every built service a Compose healthcheck using its actual binary path with --telemetry-healthcheck. Use Go 1.25 or newer and OpenTelemetry v1.45.0 for otel, sdk, sdk/metric, exporters/otlp/otlpmetric/otlpmetrichttp, and exporters/otlp/otlptrace/otlptracehttp. Include a Compose service named alloy with image grafana/alloy:latest as a placeholder; deployment installs its fixed configuration and final wiring. Emit business telemetry using global OTel providers without custom SDK/exporter bootstrap; business logs need not use any mandated format. Deployment supplies the local Alloy endpoint, service identity, and run ID. Cloud configuration is only passed to Alloy: " + strings.Join(names, ", ") + ". Never put Cloud credentials, direct GRAFANA_* references, or authentication headers in application services."
 }
 
 var reference = regexp.MustCompile(`(?:sys\.)?env\s*\(\s*"(GRAFANA_[A-Z0-9_]+)"\s*\)`)
@@ -90,6 +90,9 @@ type service struct {
 // Validate checks generated Alloy references without reading or reporting secrets.
 // The deployment-created root .env is accepted even before deployment writes it.
 func Validate(root string) error {
+	if _, err := os.Stat(filepath.Join(root, "internal", "telemetry", "telemetry.go")); err == nil {
+		return ValidateFoundation(root)
+	}
 	return validate(root, nil, false)
 }
 

@@ -840,7 +840,7 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
   const deployedPrototype = session.prototypes?.find((prototype) => prototype.id === deployment?.prototypeIterationId);
   const isRunning = deployment?.status === "running" || deployment?.status === "verified";
   const newerBuildReady = !!(isRunning && latestPrototype && latestPrototype.id !== deployment?.prototypeIterationId);
-  const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted" || newerBuildReady;
+  const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted" || newerBuildReady || (deployment.status === "running" && !!deployment.error);
   const stack = session.grafanaStack;
   const prototypeReady = !!latestPrototype;
   const canDeploy = prototypeReady && stack?.status === "ready";
@@ -850,7 +850,7 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
   return <section className={`deployment-card status-${deployment?.status ?? "ready"}`}>
     <span>LOCAL DEPLOYMENT</span>
     {!deployment && <p>Run the generated application locally with Docker Compose and send telemetry to this demo’s Grafana stack.</p>}
-    {deployment && <div className="deployment-status"><strong>{deployment.status.replaceAll("_", " ")}</strong>{progress && <small>{busy && <span className="activity-pulse" />}{progress}</small>}</div>}
+    {deployment && <div className="deployment-status"><strong>{deployment.status === "verified" ? "Telemetry verified" : deployment.status === "verifying" ? "Application ready · verifying telemetry" : deployment.status === "running" ? "Application running · telemetry not verified" : deployment.status.replaceAll("_", " ")}</strong>{progress && <small>{busy && <span className="activity-pulse" />}{progress}</small>}</div>}
     {deployment?.error && <p className="deployment-error">{deployment.error}</p>}
     {isRunning && deployedPrototype && <p>Deployed build: iteration {deployedPrototype.number}.</p>}
     {newerBuildReady && <p>Iteration {latestPrototype?.number} is ready to deploy. The previous build remains deployed until you start the replacement.</p>}
@@ -885,7 +885,7 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
       <small>The token is written only to the prototype’s local <code>.env</code> file with owner-only permissions. It is not saved in the session database or chat.</small>
     </form>}
 
-    {(deployment?.status === "running" || deployment?.status === "verified") && <div className="deployment-running"><strong>Docker Compose is {deployment.status}</strong><small>The Grafana Cloud stack is preserved when local services stop.</small></div>}
+    {(deployment?.status === "running" || deployment?.status === "verified") && <div className="deployment-running"><strong>{deployment.status === "verified" ? "Metrics, logs, and traces received" : "Telemetry delivery not verified"}</strong><small>{deployment.status === "verified" ? "Deployment probes from every application service were observed in this Grafana stack. This is a point-in-time delivery check, not validation of every demo query or continuous health." : "A saved running status does not prove current health or signal delivery. Check the progress and any verification error above."}</small><small>The Grafana Cloud stack is preserved when local services stop.</small></div>}
   </section>;
 }
 

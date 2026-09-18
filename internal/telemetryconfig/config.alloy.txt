@@ -1,0 +1,63 @@
+// Code owned by the demo compiler. Regenerate the prototype to update it.
+otelcol.receiver.otlp "applications" {
+  http { endpoint = "0.0.0.0:4318" }
+  output {
+    metrics = [otelcol.processor.batch.cloud.input]
+    traces = [otelcol.processor.batch.cloud.input]
+  }
+}
+otelcol.processor.batch "cloud" {
+  timeout = "1s"
+  output {
+    metrics = [otelcol.exporter.otlphttp.cloud.input]
+    traces = [otelcol.exporter.otlphttp.cloud.input]
+  }
+}
+otelcol.auth.basic "cloud" {
+  username = sys.env("GRAFANA_CLOUD_INSTANCE_ID")
+  password = sys.env("GRAFANA_CLOUD_API_KEY")
+}
+otelcol.exporter.otlphttp "cloud" {
+  client {
+    endpoint = sys.env("GRAFANA_CLOUD_OTLP_ENDPOINT")
+    auth = otelcol.auth.basic.cloud.handler
+  }
+}
+discovery.docker "applications" {
+  host = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+  filter {
+    name = "label"
+    values = ["com.docker.compose.project=" + sys.env("DEMO_COMPOSE_PROJECT")]
+  }
+}
+discovery.relabel "applications" {
+  targets = discovery.docker.applications.targets
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex = sys.env("DEMO_APPLICATION_SERVICES")
+    action = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label = "service_name"
+  }
+  rule {
+    target_label = "demo_run_id"
+    replacement = sys.env("DEMO_RUN_ID")
+  }
+}
+loki.source.docker "applications" {
+  host = "unix:///var/run/docker.sock"
+  targets = discovery.relabel.applications.output
+  forward_to = [loki.write.cloud.receiver]
+}
+loki.write "cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_LOKI_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_API_KEY")
+    }
+  }
+}

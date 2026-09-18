@@ -22,7 +22,7 @@ func TestSourceSnapshotExcludesRuntimeSecretsAndDetectsChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 {
+	if len(files) != 3 {
 		t.Fatal(files)
 	}
 	if _, err := ReadSource(base, ".env"); err == nil {

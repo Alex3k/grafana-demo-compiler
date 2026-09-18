@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/Alex3k/grafana-demo-compiler/internal/domain"
+	"github.com/Alex3k/grafana-demo-compiler/internal/telemetryconfig"
 )
 
 // ReadSource only exposes recorded generated artifacts, never runtime .env files.
@@ -82,6 +83,9 @@ func SourceSnapshot(base domain.PrototypeIteration) (map[string]string, string, 
 }
 
 func ValidateRevisionPath(path string) error {
+	if telemetryconfig.IsFoundationPath(path) {
+		return errors.New("compiler-owned telemetry cannot be edited by a prototype revision; regenerate to update the foundation")
+	}
 	clean, err := safePath(path)
 	if err != nil {
 		return err

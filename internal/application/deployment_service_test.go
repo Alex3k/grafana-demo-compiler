@@ -124,12 +124,14 @@ func (s *deploymentStoreStub) activeStatusesAndSessionState(sessionID string) ([
 }
 
 type deploymentRunnerStub struct {
-	connectErr  error
-	connectWait chan struct{}
-	provisions  atomic.Int32
-	started     chan string
-	actions     chan string
-	stopErr     error
+	connectErr   error
+	connectWait  chan struct{}
+	provisions   atomic.Int32
+	started      chan string
+	actions      chan string
+	stopErr      error
+	verifyErr    error
+	preflightErr error
 }
 
 func (r *deploymentRunnerStub) ConnectStack(ctx context.Context, _ string, _ string, progress func(string)) error {
@@ -159,14 +161,20 @@ func (r *deploymentRunnerStub) StopLocal(_ context.Context, root, _ string, prog
 	}
 	return r.stopErr
 }
-func (r *deploymentRunnerStub) StartLocal(_ context.Context, _, _, _, _, token, _ string, progress func(string)) error {
+func (r *deploymentRunnerStub) StartLocal(_ context.Context, _, _, _, _, token, _, _ string, progress func(string)) ([]string, error) {
 	progress("starting")
 	if r.actions != nil {
 		r.actions <- "start"
 	}
 	r.started <- token
-	return nil
+	return []string{"app"}, nil
 }
+
+func (r *deploymentRunnerStub) VerifyTelemetry(context.Context, string, string, []string, time.Time, func(string)) error {
+	return r.verifyErr
+}
+
+func (r *deploymentRunnerStub) PreflightLocal(context.Context, string) error { return r.preflightErr }
 
 func TestDeploymentServiceCreatesStackWithoutPrototype(t *testing.T) {
 	dataStore := &deploymentStoreStub{
@@ -326,7 +334,7 @@ func TestDeploymentServiceStopsPreviousDemoBeforeStartingReplacement(t *testing.
 	for {
 		select {
 		case updated := <-dataStore.updates:
-			if updated.ID == "new-deployment" && updated.Status == "running" {
+			if updated.ID == "new-deployment" && updated.Status == "verified" {
 				goto completed
 			}
 		case <-deadline:
