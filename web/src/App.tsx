@@ -836,9 +836,13 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
   const [token, setToken] = useState("");
   const [tokenSubmitting, setTokenSubmitting] = useState(false);
   const busy = deployment && ["provisioning", "starting", "verifying"].includes(deployment.status);
-  const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted";
+  const latestPrototype = session.prototypes?.find((prototype) => prototype.status === "complete");
+  const deployedPrototype = session.prototypes?.find((prototype) => prototype.id === deployment?.prototypeIterationId);
+  const isRunning = deployment?.status === "running" || deployment?.status === "verified";
+  const newerBuildReady = !!(isRunning && latestPrototype && latestPrototype.id !== deployment?.prototypeIterationId);
+  const canRetry = !deployment || deployment.status === "failed" || deployment.status === "interrupted" || newerBuildReady;
   const stack = session.grafanaStack;
-  const prototypeReady = session.prototypes?.some((prototype) => prototype.status === "complete");
+  const prototypeReady = !!latestPrototype;
   const canDeploy = prototypeReady && stack?.status === "ready";
   const progress = deployment?.progress?.at(-1);
 	const tokenHelp = deployment?.stackUrl ? `${deployment.stackUrl.replace(/\/$/, "")}/a/grafana-auth-app` : "https://grafana.com";
@@ -848,6 +852,8 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
     {!deployment && <p>Run the generated application locally with Docker Compose and send telemetry to this demo’s Grafana stack.</p>}
     {deployment && <div className="deployment-status"><strong>{deployment.status.replaceAll("_", " ")}</strong>{progress && <small>{busy && <span className="activity-pulse" />}{progress}</small>}</div>}
     {deployment?.error && <p className="deployment-error">{deployment.error}</p>}
+    {isRunning && deployedPrototype && <p>Deployed build: iteration {deployedPrototype.number}.</p>}
+    {newerBuildReady && <p>Iteration {latestPrototype?.number} is ready to deploy. The previous build remains deployed until you start the replacement.</p>}
 
     {canRetry && <form className="deployment-form" onSubmit={(event) => {
       event.preventDefault();
@@ -855,7 +861,8 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
 	}}>
       <div className="deployment-confirm"><small>Application target</small><strong>Local Docker Compose only</strong></div>
       {stack && <div className="deployment-confirm"><small>Grafana stack</small><strong>{stack.stackSlug}</strong></div>}
-		<button type="submit" disabled={!canDeploy}>Deploy locally</button>
+		<button type="submit" disabled={!canDeploy}>{newerBuildReady ? "Deploy latest build" : "Deploy locally"}</button>
+      {newerBuildReady && <small>This replaces the local services using the existing Grafana stack. The deployment flow will ask for the telemetry token.</small>}
       {!prototypeReady && <small>Build a prototype before deploying the application.</small>}
       {stack?.status !== "ready" && <small>Create and connect the Grafana stack in the Grafana section before deploying.</small>}
     </form>}
