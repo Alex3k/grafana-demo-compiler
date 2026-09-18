@@ -9,10 +9,11 @@ export function GrafanaStackCard({ session, onUpdated }: { session: Session; onU
   const [error, setError] = useState("");
   const updatedRef = useRef(onUpdated);
   updatedRef.current = onUpdated;
-  const busy = submitting || stack?.status === "provisioning";
+  const busy = submitting || stack?.status === "provisioning" || stack?.status === "awaiting_auth";
+  const statusLabel = stack && ({ provisioning: "Creating stack", awaiting_auth: "Awaiting browser approval", needs_auth: "Created, needs login", ready: "Ready", failed: "Stack creation failed" })[stack.status];
 
   useEffect(() => {
-    if (stack?.status !== "provisioning") return;
+    if (stack?.status !== "provisioning" && stack?.status !== "awaiting_auth") return;
     let stopped = false;
     let timer = 0;
     async function poll() {
@@ -21,7 +22,7 @@ export function GrafanaStackCard({ session, onUpdated }: { session: Session; onU
         if (stopped) return;
         setError("");
         if (next.grafanaStack) updatedRef.current(next.grafanaStack);
-        if (next.grafanaStack?.status !== "provisioning") return;
+        if (next.grafanaStack?.status !== "provisioning" && next.grafanaStack?.status !== "awaiting_auth") return;
       } catch (reason) {
         if (stopped) return;
         setError(reason instanceof Error ? reason.message : "Could not refresh stack progress.");
@@ -35,7 +36,19 @@ export function GrafanaStackCard({ session, onUpdated }: { session: Session; onU
   return <section className={`deployment-card stack-card status-${stack?.status ?? "empty"}`}>
     <span>GRAFANA CLOUD STACK</span>
     {!stack && <p>Create a dedicated stack for this demo’s Grafana resources and telemetry.</p>}
-    {stack && <div className="deployment-status"><strong>{stack.status}</strong><small>{busy && <span className="activity-pulse" />}{stack.progress?.at(-1) || stack.stackName}</small></div>}
+    {stack && <div className="deployment-status" aria-live="polite"><strong>{statusLabel}</strong><small>{busy && <span className="activity-pulse" />}{stack.progress?.at(-1) || stack.stackName}</small></div>}
+    {stack?.status === "awaiting_auth" && <p>Approve Grafana access in the browser window opened on this computer. This panel updates automatically when access is verified.</p>}
+    {(stack?.status === "needs_auth" || stack?.status === "ready") && <div className="deployment-form">
+      {stack.status === "needs_auth" && <p>The stack exists. Connect Grafana to enable this demo’s Grafana actions. No terminal command is needed.</p>}
+      <button type="button" disabled={busy} onClick={async () => {
+        if (busy) return;
+        setSubmitting(true);
+        setError("");
+        try { onUpdated(await api.connectStack(session.id)); }
+        catch (reason) { setError(reason instanceof Error ? reason.message : "Grafana connection could not be started."); }
+        finally { setSubmitting(false); }
+      }}>{submitting ? "Opening browser…" : stack.status === "ready" ? "Reconnect Grafana" : "Connect Grafana"}</button>
+    </div>}
     {stack?.stackUrl && <a className="deployment-stack-link" href={stack.stackUrl} target="_blank" rel="noreferrer">Open {stack.stackSlug} ↗</a>}
     {stack?.error && <p role="alert" className="deployment-error">{stack.error}</p>}
     {error && <p role="alert" className="deployment-error">{error}</p>}

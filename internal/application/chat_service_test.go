@@ -47,6 +47,9 @@ func TestFriendlyChatError(t *testing.T) {
 	if got := FriendlyChatError(chat.ErrNotConfigured); !strings.Contains(got, "Amazon Bedrock is not configured") {
 		t.Fatalf("FriendlyChatError(not configured) = %q", got)
 	}
+	if got := FriendlyChatError(chat.ErrIncompleteResponse); !strings.Contains(got, "Check Grafana actions") || !strings.Contains(got, "before retrying") {
+		t.Fatalf("FriendlyChatError(incomplete) = %q", got)
+	}
 	if got := FriendlyChatError(context.Canceled); got != "The response was interrupted. You can retry your message." {
 		t.Fatalf("FriendlyChatError(canceled) = %q", got)
 	}

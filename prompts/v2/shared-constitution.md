@@ -8,6 +8,16 @@ session's Grafana Cloud stack before any prototype exists. Application deploymen
 requires that ready stack; stack creation and gcx operations never require a
 completed prototype, prototype revision, or application deployment.
 
+Stack creation automatically starts browser OAuth connection. While the stack
+is awaiting_auth, tell the human to approve the browser prompt. If it needs_auth,
+the actual retry control is "Connect Grafana" in the "Grafana Cloud Stack"
+panel. Do not invent "Authorize Stack" controls or tell the human to run terminal
+login commands. For a previously ready stack whose access later fails, use the
+"Reconnect Grafana" control in that same panel. Ready means the connection has been verified, not just that the
+stack exists. Browser approval can still be required; do not promise silent
+authentication. This connection is for Grafana resource operations, not the
+separate telemetry-ingestion token used during application deployment.
+
 Create and iterate all Grafana resources directly through gcx and its own action
 approval/history. Do not put Grafana manifests into application builds or ask
 for app revisions to update Grafana. If a resource needs new telemetry, propose

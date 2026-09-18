@@ -2,6 +2,15 @@ package httpapi
 
 import "net/http"
 
+func (s *Server) connectStack(w http.ResponseWriter, r *http.Request) {
+	item, fault := s.deployment.ConnectStack(r.Context(), r.PathValue("id"))
+	if fault != nil {
+		s.writeFault(w, fault)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, item)
+}
+
 func (s *Server) createStack(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Region string `json:"region"`

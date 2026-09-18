@@ -18,6 +18,7 @@ import (
 
 type stackOnlyRunner struct{ application.DeploymentRunner }
 
+func (stackOnlyRunner) ConnectStack(context.Context, string, string, func(string)) error { return nil }
 func (stackOnlyRunner) Provision(context.Context, string, string, string, func(string)) (deployment.Stack, error) {
 	return deployment.Stack{URL: "https://demo.grafana.net", InstanceID: "123"}, nil
 }

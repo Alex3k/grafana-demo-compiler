@@ -453,7 +453,7 @@ func (s *Store) BeginSessionDeletion(ctx context.Context, id string) error {
  NOT EXISTS (SELECT 1 FROM brief_thread_messages WHERE session_id = ? AND status = 'streaming') AND
  NOT EXISTS (SELECT 1 FROM prototype_iterations WHERE session_id = ? AND status = 'generating') AND
  NOT EXISTS (SELECT 1 FROM deployments WHERE session_id = ? AND status IN ('provisioning','starting','verifying')) AND
- NOT EXISTS (SELECT 1 FROM session_stacks WHERE session_id = ? AND status = 'provisioning')
+ NOT EXISTS (SELECT 1 FROM session_stacks WHERE session_id = ? AND status IN ('provisioning','awaiting_auth'))
  ON CONFLICT(session_id) DO UPDATE SET session_id = excluded.session_id`, id, id, id, id, id, id)
 	if err != nil {
 		return err

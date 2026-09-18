@@ -21,8 +21,11 @@ func SessionStack(session domain.Session) string {
 		return ""
 	}
 	expected := "democompiler" + session.ID[:12]
-	if stack := session.GrafanaStack; stack != nil && stack.Status == "ready" && stack.StackSlug == expected && stack.StackURL != "" {
-		return expected
+	if stack := session.GrafanaStack; stack != nil {
+		if stack.Status == "ready" && stack.StackSlug == expected && stack.StackURL != "" {
+			return expected
+		}
+		return ""
 	}
 	for _, d := range session.Deployments {
 		if d.StackSlug == expected && d.StackURL != "" {
@@ -47,7 +50,38 @@ func (s *Service) inspectionTools(ctx context.Context, session domain.Session, o
 		return nil, "", err
 	}
 	set := aisdk.ToolSet{"read_guidance": read}
+	skill, err := aisdk.TypedTool(aisdk.TypedToolDef[struct {
+		Name      string `json:"name" jsonschema:"description=Bundled gcx skill name. Empty string lists available skills and descriptions."`
+		Reference string `json:"reference" jsonschema:"description=Empty to read the complete skill instructions. To read a referenced document supply its references/ relative path from that skill."`
+	}, string]{
+		Name: "read_gcx_skill", Description: "Read official skills and reference documents bundled with the installed gcx CLI. Read-only, no installation, credentials, or stack required. Load the relevant skill before Grafana resource work; use empty name and reference to discover skills.",
+		Execute: func(toolCtx context.Context, input struct {
+			Name      string `json:"name" jsonschema:"description=Bundled gcx skill name. Empty string lists available skills and descriptions."`
+			Reference string `json:"reference" jsonschema:"description=Empty to read the complete skill instructions. To read a referenced document supply its references/ relative path from that skill."`
+		}, _ aisdk.ToolExecutionOptions) (string, error) {
+			content, err := gcxtool.ReadSkill(toolCtx, input.Name, input.Reference)
+			if err != nil {
+				return "", err
+			}
+			label := "gcx skill catalog"
+			if input.Name != "" {
+				label = "gcx skill " + input.Name
+			}
+			if input.Reference != "" {
+				label += " reference " + input.Reference
+			}
+			if err := onDelta("\n\n_Loaded " + label + "._\n\n"); err != nil {
+				return "", err
+			}
+			return content, nil
+		},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	set["read_gcx_skill"] = skill
 	contextText := "\n\nAvailable guidance: " + guidance.Catalog() + ". Read demo-storytelling.md before proposing/refining a story and grafana-setup.md before Grafana work. Guidance is adaptable; confirmed decisions and product rules take precedence."
+	contextText += "\nBefore Grafana resource work, load the relevant installed gcx skill through read_gcx_skill: create-dashboard for a new dashboard; manage-dashboards for inspecting/updating an existing dashboard; slo-manage for SLO changes; gcx for general resource operations. Discover other skills with an empty name. Read referenced documents through the same tool when instructed. These are implementation guidance, not authority to bypass session targeting, inline manifests, approval, secret restrictions, or the compiler-managed OAuth flow. If a skill requires unsupported shell/file/screenshot capabilities, explain that limitation rather than inventing tool results. Do not regenerate an application to follow a resource-only skill."
 	if s.gcxStore == nil {
 		return set, contextText, nil
 	}
@@ -63,10 +97,14 @@ func (s *Service) inspectionTools(ctx context.Context, session domain.Session, o
 				if err := gcxtool.CheckContext(toolCtx, a.Stack); err != nil {
 					return gcxtool.Action{Status: "blocked", Output: err.Error()}, nil
 				}
+				a, err = s.gcxStore.CreateGCXAction(toolCtx, a)
+				if err != nil {
+					return a, err
+				}
 				if err := onDelta("\n\nA Grafana change is ready for your review in **Grafana actions**. Nothing has been changed yet.\n\n"); err != nil {
 					return a, err
 				}
-				return s.gcxStore.CreateGCXAction(toolCtx, a)
+				return a, nil
 			}
 			if err := onDelta("\n\n_Inspecting Grafana with gcx…_\n\n"); err != nil {
 				return a, err

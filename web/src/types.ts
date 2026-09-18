@@ -40,7 +40,7 @@ export interface GrafanaStack {
   stackUrl?: string;
   otlpEndpoint?: string;
   instanceId?: string;
-  status: "provisioning" | "ready" | "failed";
+  status: "provisioning" | "awaiting_auth" | "needs_auth" | "ready" | "failed";
   progress: string[];
   error?: string;
   createdAt: string;

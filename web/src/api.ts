@@ -40,6 +40,8 @@ export const api = {
     json<PrototypeIteration>(`/api/sessions/${sessionId}/prototypes`, { method: "POST" }),
   createStack: (sessionId: string, region: string) =>
     json<GrafanaStack>(`/api/sessions/${sessionId}/stack`, { method: "POST", body: JSON.stringify({ region }) }),
+  connectStack: (sessionId: string) =>
+    json<GrafanaStack>(`/api/sessions/${sessionId}/stack/connect`, { method: "POST" }),
   createDeployment: (sessionId: string, region: string) =>
     json<Deployment>(`/api/sessions/${sessionId}/deployments`, {
       method: "POST",

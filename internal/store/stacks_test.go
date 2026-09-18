@@ -129,7 +129,7 @@ func TestMigrationBackfillsExistingDeploymentStackWithoutChangingDeployment(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.GrafanaStack == nil || loaded.GrafanaStack.Status != "ready" || loaded.GrafanaStack.StackURL != item.StackURL || loaded.GrafanaStack.OTLPEndpoint != item.OTLPEndpoint || loaded.GrafanaStack.InstanceID != item.InstanceID {
+	if loaded.GrafanaStack == nil || loaded.GrafanaStack.Status != "needs_auth" || loaded.GrafanaStack.StackURL != item.StackURL || loaded.GrafanaStack.OTLPEndpoint != item.OTLPEndpoint || loaded.GrafanaStack.InstanceID != item.InstanceID {
 		t.Fatalf("missing migrated stack: %#v", loaded.GrafanaStack)
 	}
 	if len(loaded.Deployments) != 1 || loaded.Deployments[0].Status != "needs_token" || loaded.Deployments[0].ID != item.ID {

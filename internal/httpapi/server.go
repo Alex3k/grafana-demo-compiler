@@ -68,6 +68,7 @@ func New(
 	mux.HandleFunc("POST /api/sessions/{id}/prototypes", server.createPrototype)
 	mux.HandleFunc("POST /api/sessions/{id}/deployments", server.createDeployment)
 	mux.HandleFunc("POST /api/sessions/{id}/stack", server.createStack)
+	mux.HandleFunc("POST /api/sessions/{id}/stack/connect", server.connectStack)
 	mux.HandleFunc("POST /api/sessions/{id}/deployments/{deploymentID}/token", server.configureDeploymentToken)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads", server.openBriefThread)
 	mux.HandleFunc("POST /api/sessions/{id}/brief-threads/{threadID}/messages", server.createBriefThreadMessage)

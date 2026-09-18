@@ -628,7 +628,7 @@ function ContextRail({ open, session, health, onClose, onFocusTopic, prototypeBu
       {session && <section className="session-work-area" aria-label="Grafana">
         <p className="eyebrow rail-section">GRAFANA</p>
         <GrafanaStackCard key={`grafana-stack:${session.id}`} session={session} onUpdated={onStackUpdated} />
-        <GrafanaActions key={`grafana-actions:${session.id}`} sessionId={session.id} />
+        <GrafanaActions key={`grafana-actions:${session.id}`} sessionId={session.id} stackStatus={session.grafanaStack?.status} />
       </section>}
       {session && <section className="session-work-area" aria-label="Application">
         <p className="eyebrow rail-section">APPLICATION</p>
@@ -857,7 +857,7 @@ function DeploymentCard({ session, deployment, onDeploy, onSubmitToken }: { sess
       {stack && <div className="deployment-confirm"><small>Grafana stack</small><strong>{stack.stackSlug}</strong></div>}
 		<button type="submit" disabled={!canDeploy}>Deploy locally</button>
       {!prototypeReady && <small>Build a prototype before deploying the application.</small>}
-      {stack?.status !== "ready" && <small>Create a ready Grafana stack in the Grafana section before deploying.</small>}
+      {stack?.status !== "ready" && <small>Create and connect the Grafana stack in the Grafana section before deploying.</small>}
     </form>}
 
     {deployment?.status === "needs_token" && <form className="deployment-form token-form" onSubmit={async (event) => {

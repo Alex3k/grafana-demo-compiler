@@ -14,4 +14,9 @@ func TestSessionStackWithoutPrototypeOrDeployment(t *testing.T) {
 	if SessionStack(session) != "" {
 		t.Fatal("unready stack was exposed")
 	}
+	session.GrafanaStack.Status = "needs_auth"
+	session.Deployments = []domain.Deployment{{StackSlug: session.GrafanaStack.StackSlug, StackURL: session.GrafanaStack.StackURL}}
+	if SessionStack(session) != "" {
+		t.Fatal("legacy deployment bypassed stack authentication state")
+	}
 }

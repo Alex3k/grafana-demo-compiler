@@ -26,6 +26,16 @@ type deploymentStoreStub struct {
 	stackUpdates chan domain.GrafanaStack
 }
 
+func (s *deploymentStoreStub) ClaimStackConnect(_ context.Context, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session.GrafanaStack == nil || (s.session.GrafanaStack.Status != "needs_auth" && s.session.GrafanaStack.Status != "ready") {
+		return false, nil
+	}
+	s.session.GrafanaStack.Status = "awaiting_auth"
+	return true, nil
+}
+
 func (s *deploymentStoreStub) ClaimGrafanaStack(_ context.Context, item domain.GrafanaStack) (domain.GrafanaStack, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -114,10 +124,24 @@ func (s *deploymentStoreStub) activeStatusesAndSessionState(sessionID string) ([
 }
 
 type deploymentRunnerStub struct {
-	provisions atomic.Int32
-	started    chan string
-	actions    chan string
-	stopErr    error
+	connectErr  error
+	connectWait chan struct{}
+	provisions  atomic.Int32
+	started     chan string
+	actions     chan string
+	stopErr     error
+}
+
+func (r *deploymentRunnerStub) ConnectStack(ctx context.Context, _ string, _ string, progress func(string)) error {
+	progress("Awaiting browser approval")
+	if r.connectWait != nil {
+		select {
+		case <-r.connectWait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return r.connectErr
 }
 
 func (r *deploymentRunnerStub) Provision(_ context.Context, _, _, _ string, progress func(string)) (deployment.Stack, error) {

@@ -152,6 +152,9 @@ func SuggestedTitle(content string) string {
 }
 
 func FriendlyChatError(err error) string {
+	if errors.Is(err, chat.ErrIncompleteResponse) {
+		return "The assistant stopped before completing its response or tool request. Check Grafana actions for any proposal already prepared before retrying; only listed approval actions are ready to execute."
+	}
 	if errors.Is(err, chat.ErrNotConfigured) {
 		return "Amazon Bedrock is not configured. Set AWS_REGION and BEDROCK_MODEL_ID, then restart the compiler."
 	}

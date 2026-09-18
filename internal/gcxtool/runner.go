@@ -98,7 +98,7 @@ func Classify(ctx context.Context, req Request) (read bool, err error) {
 			flags["-"+f.Shorthand] = f
 		}
 	}
-	allowedFlags := "|help|output|json|jq|depth|datasource|expr|from|to|since|step|time|limit|start|end|query|label|labels|llm|uid|name|title|description|folder|folder-uid|namespace|selector|all-namespaces|state|status|page|per-page|force|yes|dry-run|overwrite|on-error|max-concurrent|include-managed|omit-manager-fields|file|path|"
+	allowedFlags := "|help|output|json|jq|depth|datasource|expr|from|to|since|step|time|limit|start|end|query|label|labels|llm|uid|name|title|description|folder|folder-uid|namespace|selector|all-namespaces|state|status|page|per-page|force|yes|dry-run|overwrite|on-error|max-concurrent|include-managed|omit-manager-fields|file|filename|path|"
 	help, usedManifest := false, false
 	for i := count; i < len(req.Args); i++ {
 		a := req.Args[i]
@@ -116,7 +116,7 @@ func Classify(ctx context.Context, req Request) (read bool, err error) {
 					}
 					value = req.Args[i]
 				}
-				if f.Name == "file" || f.Name == "path" {
+				if f.Name == "file" || f.Name == "filename" || f.Name == "path" {
 					if value != "@manifest" || req.Manifest == "" {
 						return false, errors.New("file inputs must use @manifest and supplied manifest content")
 					}
@@ -179,6 +179,13 @@ func Execute(ctx context.Context, stack string, req Request) (string, error) {
 		}
 	}
 	args = append(args, "--context", stack)
+	if slugPattern.MatchString(stack) {
+		configArgs, err := stackConfigArgs(stack)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, configArgs...)
+	}
 	output, err := run(ctx, dir, args, "", 6000)
 	return Redact(output), err
 }
@@ -187,9 +194,14 @@ func CheckContext(ctx context.Context, stack string) error {
 	if !slugPattern.MatchString(stack) {
 		return errors.New("no dedicated demo stack is available")
 	}
-	output, err := run(ctx, "", []string{"config", "view", "--context", stack, "--minify", "-o", "json"}, "", 1024*1024)
+	configArgs, err := stackConfigArgs(stack)
 	if err != nil {
-		return fmt.Errorf("one-time login required: gcx login %s --server https://%s.grafana.net --oauth", stack, stack)
+		return err
+	}
+	args := append([]string{"config", "view", "--context", stack, "--minify", "-o", "json"}, configArgs...)
+	output, err := run(ctx, "", args, "", 1024*1024)
+	if err != nil {
+		return errors.New("Grafana connection is unavailable. Use Connect Grafana in the Grafana Cloud Stack panel to start browser approval, then retry")
 	}
 	var cfg struct {
 		Contexts map[string]struct {
@@ -205,6 +217,32 @@ func CheckContext(ctx context.Context, stack string) error {
 		return errors.New("gcx context must point to this session's exact Grafana Cloud URL")
 	}
 	return nil
+}
+
+// StackConfigPath keeps web-managed OAuth credentials separate from the user's
+// gcx configuration and selected Cloud context.
+func StackConfigPath(stack string) (string, error) {
+	if !slugPattern.MatchString(stack) {
+		return "", errors.New("invalid demo stack identity")
+	}
+	root := os.Getenv("DEMO_COMPILER_DATA_DIR")
+	if root == "" {
+		root = "./data"
+	}
+	return filepath.Abs(filepath.Join(root, "gcx", stack+".yaml"))
+}
+
+func stackConfigArgs(stack string) ([]string, error) {
+	path, err := StackConfigPath(stack)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil // Existing manually connected sessions remain usable.
+	} else if err != nil {
+		return nil, err
+	}
+	return []string{"--config", path}, nil
 }
 
 type limitedBuffer struct {

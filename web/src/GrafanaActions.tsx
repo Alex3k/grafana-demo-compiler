@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import type { GrafanaStack } from "./types";
 
 type Action = { id: string; stack: string; request: { args: string[]; manifest?: string; reason: string }; status: string; output: string };
 type Snapshot = { stack: string; actions: Action[] };
 
-export function GrafanaActions({ sessionId }: { sessionId: string }) {
+export function GrafanaActions({ sessionId, stackStatus }: { sessionId: string; stackStatus?: GrafanaStack["status"] }) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ stack: "", actions: [] });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -37,7 +38,7 @@ export function GrafanaActions({ sessionId }: { sessionId: string }) {
   return <section className="grafana-actions">
     <p className="eyebrow rail-section">GRAFANA ACTIONS</p>
     <p>Reads run automatically. Each write needs your approval.</p>
-    {snapshot.stack ? <details><summary>One-time gcx login</summary><p>Run in your terminal, then retry your request. Credentials stay out of chat.</p><pre>{`gcx login ${snapshot.stack} --server https://${snapshot.stack}.grafana.net --oauth`}</pre></details> : <p>Create this demo’s stack first to inspect or change its Grafana resources.</p>}
+    {stackStatus === "needs_auth" ? <p>Use Connect Grafana in the Grafana Cloud Stack panel above to enable Grafana actions.</p> : stackStatus === "awaiting_auth" ? <p>Waiting for browser approval before running Grafana actions.</p> : stackStatus !== "ready" && <p>Create and connect this demo’s stack first to inspect or change its Grafana resources.</p>}
     {error && <p role="alert" className="topic-error">{error}</p>}
     {snapshot.actions.map(action => <details key={action.id} open={action.status === "pending" || action.status === "running"}>
       <summary>{action.status === "pending" ? "Approval required" : action.status} · {action.request.reason || "gcx operation"}</summary>

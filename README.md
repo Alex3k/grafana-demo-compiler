@@ -319,6 +319,14 @@ not saved in SQLite, chat messages, progress events, generated source, or model
 telemetry. Anyone with sufficient local Docker access may inspect container
 configuration, so the token should be scoped and handled as a secret.
 
+After stack creation the compiler starts gcx browser OAuth automatically. Approve
+the browser prompt; no terminal command is needed for the per-stack connection.
+The stack shows Ready only after access has been verified. If approval is
+cancelled or expires, use Connect Grafana in the stack panel to retry without
+creating another stack. This is a local-server workflow: the browser and OAuth
+callback run on the compiler's host. It does not replace the separate telemetry
+token described above.
+
 Stack creation and Docker startup run as background operations, so closing a
 browser request does not intentionally cancel them. Progress and failures are
 persisted on the session.

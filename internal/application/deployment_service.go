@@ -17,6 +17,7 @@ import (
 )
 
 type DeploymentStore interface {
+	ClaimStackConnect(context.Context, string) (bool, error)
 	ClaimGrafanaStack(context.Context, domain.GrafanaStack) (domain.GrafanaStack, bool, error)
 	UpdateGrafanaStack(context.Context, domain.GrafanaStack) error
 	GetSession(context.Context, string) (domain.Session, error)
@@ -29,6 +30,7 @@ type DeploymentStore interface {
 }
 
 type DeploymentRunner interface {
+	ConnectStack(context.Context, string, string, func(string)) error
 	Provision(context.Context, string, string, string, func(string)) (deployment.Stack, error)
 	ResolveOTLP(context.Context, string, string) (string, error)
 	StopLocal(context.Context, string, string, func(string)) error
@@ -124,6 +126,51 @@ func (s *DeploymentService) CreateStack(ctx context.Context, sessionID, region s
 	}
 	go s.provision(item)
 	return item, nil
+}
+
+func (s *DeploymentService) ConnectStack(ctx context.Context, sessionID string) (domain.GrafanaStack, *Fault) {
+	session, err := s.store.GetSession(ctx, sessionID)
+	if errors.Is(err, store.ErrNotFound) {
+		return domain.GrafanaStack{}, &Fault{Code: FaultNotFound, Public: "Session not found"}
+	}
+	if err != nil {
+		return domain.GrafanaStack{}, &Fault{Code: FaultInternal, Public: "Could not load session", Cause: err}
+	}
+	if session.GrafanaStack == nil {
+		return domain.GrafanaStack{}, &Fault{Code: FaultConflict, Public: "Create the Grafana stack before connecting"}
+	}
+	claimed, err := s.store.ClaimStackConnect(ctx, sessionID)
+	if err != nil {
+		return domain.GrafanaStack{}, &Fault{Code: FaultInternal, Public: "Could not start Grafana connection", Cause: err}
+	}
+	if !claimed {
+		return domain.GrafanaStack{}, &Fault{Code: FaultConflict, Public: "Grafana stack is busy or being deleted"}
+	}
+	item := *session.GrafanaStack
+	item.Status, item.Error = "awaiting_auth", ""
+	go s.connectStack(item)
+	return item, nil
+}
+
+func (s *DeploymentService) connectStack(item domain.GrafanaStack) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	progress := func(message string) {
+		item.Progress = append(item.Progress, message)
+		persistCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := s.store.UpdateGrafanaStack(persistCtx, item); err != nil {
+			s.log.Error("save Grafana connection progress", "sessionId", item.SessionID, "error", err)
+		}
+	}
+	if err := s.runner.ConnectStack(ctx, item.StackSlug, item.StackURL, progress); err != nil {
+		item.Status = "needs_auth"
+		item.Error = "Grafana connection was not completed. Click Connect Grafana to retry browser approval."
+		progress(item.Error)
+		return
+	}
+	item.Status, item.Error = "ready", ""
+	progress("Grafana Cloud stack is connected and ready")
 }
 
 // ConfigureToken claims a waiting deployment, resolves missing connection
@@ -232,13 +279,17 @@ func (s *DeploymentService) provision(item domain.GrafanaStack) {
 		appendProgress("Stack provisioning stopped: " + actionableDeploymentError(err))
 	} else {
 		item.StackURL, item.OTLPEndpoint, item.InstanceID = stack.URL, stack.OTLPEndpoint, stack.InstanceID
-		item.Status = "ready"
-		appendProgress("Grafana Cloud stack is ready")
+		item.Status = "awaiting_auth"
+		appendProgress("Grafana Cloud stack created; connecting Grafana")
 	}
 	persistCtx, cancelPersist := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelPersist()
 	if err := s.store.UpdateGrafanaStack(persistCtx, item); err != nil {
 		s.log.Error("finish stack provisioning", "sessionId", item.SessionID, "deploymentId", item.ID, "error", err)
+		return
+	}
+	if item.Status == "awaiting_auth" {
+		s.connectStack(item)
 	}
 }
 

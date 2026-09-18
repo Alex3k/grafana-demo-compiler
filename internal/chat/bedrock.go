@@ -39,6 +39,7 @@ const (
 )
 
 var ErrNotConfigured = errors.New("Amazon Bedrock is not configured")
+var ErrIncompleteResponse = errors.New("assistant response did not complete")
 
 type Service struct {
 	gcxStore      *store.Store
@@ -400,6 +401,12 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 		role = roleFocused
 	}
 	ctx, generationID := s.roleContext(ctx, session, role, manifest)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	maxOutputTokens := 12000
+	if focus != nil {
+		maxOutputTokens = 1200
+	}
 
 	stream := aisdk.StreamText(ctx, s.model,
 		aisdk.WithSystem(appPrompts.Collaborator()+systemContext+toolContext),
@@ -407,12 +414,16 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 		aisdk.WithTools(tools),
 		aisdk.WithStopWhen(aisdk.StepCountIs(10)),
 		aisdk.WithModelMessages(modelMessages(selectedMessages)...),
-		aisdk.WithMaxOutputTokens(1200),
+		aisdk.WithMaxOutputTokens(maxOutputTokens),
 		aisdk.WithMaxRetries(1),
 	)
 
 	var text strings.Builder
+	completion := conversationCompletion{}
 	for part := range stream.FullStream() {
+		if err := completion.observe(part); err != nil {
+			return Result{}, err
+		}
 		switch value := part.(type) {
 		case aisdk.StreamTextDelta:
 			text.WriteString(value.Text)
@@ -430,7 +441,49 @@ func (s *Service) stream(ctx context.Context, session domain.Session, messages [
 	if err := stream.Err(); err != nil {
 		return Result{}, fmt.Errorf("stream Bedrock response: %w", err)
 	}
+	if !completion.finished {
+		return Result{}, fmt.Errorf("%w: missing finish event", ErrIncompleteResponse)
+	}
 	return Result{Text: sanitizeAssistantText(text.String()), GenerationID: generationID}, nil
+}
+
+// Track completion independently of text: a streamed promise is not evidence
+// that the following tool call was complete. Never include tool payloads here.
+type conversationCompletion struct {
+	pending  map[string]bool
+	finished bool
+}
+
+func (c *conversationCompletion) observe(part aisdk.TextStreamPart) error {
+	switch value := part.(type) {
+	case aisdk.StreamToolInputStart:
+		if c.pending == nil {
+			c.pending = make(map[string]bool)
+		}
+		c.pending[value.ID] = true
+	case aisdk.StreamToolCall:
+		delete(c.pending, value.ToolCallID)
+		if value.Invalid || value.Error != nil {
+			return fmt.Errorf("%w: invalid tool arguments", ErrIncompleteResponse)
+		}
+	case aisdk.StreamFinishStep:
+		if len(c.pending) != 0 {
+			return fmt.Errorf("%w: incomplete tool arguments", ErrIncompleteResponse)
+		}
+		switch value.FinishReason.Unified {
+		case provider.FinishReasonStop, provider.FinishReasonToolCalls:
+		default:
+			return fmt.Errorf("%w: model step ended with %s", ErrIncompleteResponse, value.FinishReason.Unified)
+		}
+	case aisdk.StreamFinish:
+		// Tool calls at the final boundary mean the orchestration stopped
+		// before a final response (for example, its step limit was reached).
+		if len(c.pending) != 0 || value.FinishReason.Unified != provider.FinishReasonStop {
+			return fmt.Errorf("%w: conversation ended with %s", ErrIncompleteResponse, value.FinishReason.Unified)
+		}
+		c.finished = true
+	}
+	return nil
 }
 
 func collaboratorContext(packet contextengine.CollaboratorContext) string {

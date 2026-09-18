@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Alex3k/grafana-demo-compiler/internal/gcxtool"
 	"github.com/Alex3k/grafana-demo-compiler/internal/store"
 )
 
@@ -88,6 +89,13 @@ func (s *DeploymentService) DeleteSession(ctx context.Context, data *store.Store
 	}
 	if err := os.RemoveAll(sessionRoot); err != nil {
 		return fmt.Errorf("remove generated files: %w", err)
+	}
+	config, err := gcxtool.StackConfigPath(expectedSlug)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(config); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove Grafana credentials: %w", err)
 	}
 	return data.DeleteSession(ctx, id)
 }
